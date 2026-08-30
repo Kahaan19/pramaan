@@ -60,6 +60,15 @@ docs/                   diagrams, threat-model → control mapping, mandate exam
 - Small, testable modules. Every security-relevant function gets unit tests.
 - When wiring Razorpay, verify tool names/params against the live MCP server and Razorpay docs; the live MCP server has no `payment_link_upi_create` tool, and `initiate_payment` (S2S UPI) returns 404 on this test account (S2S JSON v1 requires separate Razorpay approval not granted by default). The Phase 0 executor uses `create_order` → `create_payment_link` → `fetch_payment_link`, calling `fetch_payment` only if the link already shows a `payment_id` (it won't until a human actually pays it — that's the honest limit of a fully automated demo endpoint).
 
+## Git & commit discipline
+- Commit early and often — at minimum once per completed checkpoint, but also after any meaningfully complete sub-step (a working module, a passing test suite, a fixed bug), not just at the end of a phase.
+- Never bundle unrelated changes into one commit. If a turn touches two different concerns (e.g. a docs fix and a new feature), make two commits.
+- Write real commit messages, not "wip" or "update". Use conventional-commit style prefixes: feat:, fix:, docs:, test:, refactor:, chore:. Example: feat(mandates): add Ed25519 sign/verify with scope check
+- Commit message body (when the change is non-trivial) should say what changed and why, in 1-3 short lines — not a diff restatement.
+- After every commit, run git push so the remote (GitHub) stays in sync. Tell me if a push fails rather than silently retrying with force.
+- Before starting a new phase, confirm the previous phase's work is committed and pushed.
+- Never commit .env, secrets, or generated keypairs. If unsure whether something is sensitive, ask before committing.
+
 ## Build phase tracker (update as we go)
 - [x] Phase 0 — Spine: FastAPI + Postgres + Razorpay MCP; one order→UPI link→fetch works
 - [ ] Phase 1 — Mandates: Ed25519 sign/verify + scope check
