@@ -2,6 +2,8 @@
 
 **Razorpay AI Buildathon 2026 · Track 01: AI Growth & Agentic Commerce**
 
+[github.com/Kahaan19/pramaan](https://github.com/Kahaan19/pramaan)
+
 Pramaan makes a Razorpay merchant safely transactable by an autonomous AI buyer. Every
 money action is **bound by a signed mandate**, **gated by deterministic policy-as-code**,
 **executed only through Razorpay's official MCP server** (test mode), and written to a
@@ -22,6 +24,12 @@ See `ARCHITECTURE.md`. Threat-model → control mapping in `docs/`.
 
 **Phase 0 spine only** — proves the Razorpay money path works. No mandates or policy
 gate in front of it yet; that lands in Phases 1–2.
+
+### Clone
+```
+git clone https://github.com/Kahaan19/pramaan.git
+cd pramaan
+```
 
 1. Postgres running locally and reachable at `DATABASE_URL` (e.g. `docker run --name
    pramaan-db -e POSTGRES_PASSWORD=pramaan -p 5432:5432 -d postgres`, then
