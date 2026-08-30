@@ -5,6 +5,7 @@ SQLAlchemy>=2.0
 psycopg2-binary>=2.9
 python-dotenv>=1.0
 httpx>=0.27
+mcp>=1.9
 pynacl>=1.5
 pyyaml>=6.0
 langgraph>=0.2

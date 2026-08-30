@@ -57,7 +57,7 @@ flowchart TB
 
     subgraph RZP["💳 Razorpay (Test Mode)"]
         MCP[Official Razorpay MCP Server]
-        API[create_order · payment_link_upi_create<br/>capture_payment · fetch_payment]
+        API[create_order · create_payment_link<br/>fetch_payment_link · fetch_payment]
         WH[Webhooks → payment status]
     end
 
@@ -99,7 +99,7 @@ sequenceDiagram
     P->>P: 1. verify mandate signatures + scope
     P->>P: 2. policy-as-code: within cap? merchant allowlisted? velocity ok?
     P->>L: log decision + rule that fired + "why"
-    P->>R: 3. create_order → payment_link_upi_create
+    P->>R: 3. create_order → create_payment_link
     R-->>P: order_id, payment_link
     R->>P: webhook: payment captured
     P->>L: log execution + Razorpay refs
@@ -134,7 +134,7 @@ sequenceDiagram
 - This is your maker-checker + RBAC + least-privilege, reframed for agents.
 
 ### 5.5 Bounded Executor — *the only thing that can move money*
-- Wraps the **official Razorpay MCP server** (test mode): `create_order`, `payment_link_upi_create`, `capture_payment`, `fetch_payment`.
+- Wraps the **official Razorpay MCP server** (test mode): `create_order`, `create_payment_link`, `fetch_payment_link`, `fetch_payment`, `capture_payment`. (`initiate_payment`, the S2S UPI API, 404s on standard test accounts — it needs separate Razorpay approval — so the automated demo path uses a payment link and fetches its status rather than a synchronously-completed payment.)
 - **Read-only by default;** write/money actions require a passing verdict. Uses a **just-in-time, scoped credential** per transaction (short-lived, single-purpose) — the least-privilege pattern from the enterprise playbooks.
 - Idempotency keys so a retry can never double-charge.
 - Listens to Razorpay **webhooks** to confirm final status (closes the loop the way Razorpay's own agentic product does).
@@ -202,7 +202,7 @@ Everything here is squarely inside what you already do and what Claude Code acce
 
 Build the **spine first, guardrails second, polish last.** Each phase is a working checkpoint.
 
-- **Phase 0 — Spine (money moves once).** FastAPI skeleton + Postgres. Wire the Razorpay MCP server in test mode. Get one `create_order → payment_link_upi_create → fetch_payment` working end to end. *Checkpoint: a rupee moves in test mode.*
+- **Phase 0 — Spine (money moves once).** FastAPI skeleton + Postgres. Wire the Razorpay MCP server in test mode. Get one `create_order → create_payment_link → fetch_payment_link` working end to end (fetches an actual payment only once one exists). *Checkpoint: a rupee can move in test mode via the link — full automated capture is a Phase 5 rogue-agent-demo concern.*
 - **Phase 1 — Mandates.** Intent + Cart schemas; Ed25519 sign/verify; scope check (cart ≤ intent). Buyer agent signs an intent; plane verifies. *Checkpoint: bad signature / over-scope cart is rejected.*
 - **Phase 2 — Policy engine.** Deterministic rules (cap, velocity, allowlist, step-up threshold) over a YAML file; `ALLOW/STEP_UP/DENY` + rule-fired. Unit tests. *Checkpoint: verdicts are reproducible and tested.*
 - **Phase 3 — Audit ledger.** Hash-chained append-only table; log every check/verdict/call; the *"explain transaction"* API. *Checkpoint: any transaction reconstructs in plain English.*

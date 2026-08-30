@@ -58,10 +58,10 @@ docs/                   diagrams, threat-model → control mapping, mandate exam
 - Pure functions for policy rules: `rule(context) -> Optional[Violation]`. Compose them; first violation wins for DENY; threshold rules can escalate to STEP_UP.
 - Canonical JSON (sorted keys, no whitespace ambiguity) before signing/verifying and before hashing ledger rows — signatures and hashes must be reproducible.
 - Small, testable modules. Every security-relevant function gets unit tests.
-- When wiring Razorpay, verify tool names/params against the live MCP server and Razorpay docs; the money tools are `create_order`, `payment_link_upi_create`, `capture_payment`, `fetch_payment`.
+- When wiring Razorpay, verify tool names/params against the live MCP server and Razorpay docs; the live MCP server has no `payment_link_upi_create` tool, and `initiate_payment` (S2S UPI) returns 404 on this test account (S2S JSON v1 requires separate Razorpay approval not granted by default). The Phase 0 executor uses `create_order` → `create_payment_link` → `fetch_payment_link`, calling `fetch_payment` only if the link already shows a `payment_id` (it won't until a human actually pays it — that's the honest limit of a fully automated demo endpoint).
 
 ## Build phase tracker (update as we go)
-- [ ] Phase 0 — Spine: FastAPI + Postgres + Razorpay MCP; one order→UPI link→fetch works
+- [x] Phase 0 — Spine: FastAPI + Postgres + Razorpay MCP; one order→UPI link→fetch works
 - [ ] Phase 1 — Mandates: Ed25519 sign/verify + scope check
 - [ ] Phase 2 — Policy engine: deterministic rules + verdicts + tests
 - [ ] Phase 3 — Ledger: hash chain + explain() API

@@ -19,7 +19,28 @@ Guardrails live in code, never in prompts.
 See `ARCHITECTURE.md`. Threat-model → control mapping in `docs/`.
 
 ## Run
-_(Filled during Phase 0.)_
+
+**Phase 0 spine only** — proves the Razorpay money path works. No mandates or policy
+gate in front of it yet; that lands in Phases 1–2.
+
+1. Postgres running locally and reachable at `DATABASE_URL` (e.g. `docker run --name
+   pramaan-db -e POSTGRES_PASSWORD=pramaan -p 5432:5432 -d postgres`, then
+   `docker exec pramaan-db psql -U postgres -c "CREATE DATABASE pramaan"`).
+2. `.env` filled in from `.env.example` (test-mode Razorpay keys + `RAZORPAY_MERCHANT_TOKEN`).
+3. `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
+4. `uvicorn main:app --app-dir control-plane --reload`
+5. `curl -X POST localhost:8000/demo/checkout -H "Content-Type: application/json" \
+   -d '{"amount_paise": 1299, "description": "test purchase"}'`
+
+Returns a real test-mode Razorpay order + payment link (`order_id`, `payment_link_id`,
+`short_url`, statuses). Passing the same `idempotency_key` on a retry returns the exact
+same references instead of creating a second order/link — verified live, no double-charge.
+
+**Note on the chain:** the live MCP server has no `payment_link_upi_create` tool, and its
+S2S UPI tool (`initiate_payment`) 404s on standard test accounts (needs separate Razorpay
+approval). So the automated chain is `create_order` → `create_payment_link` →
+`fetch_payment_link`, with `fetch_payment` only called once the link shows an actual
+payment — honest limit of a fully automated, no-human-clicks-a-link demo endpoint.
 
 ## Demo
 _(Filled during Phase 5: the three blocked attacks + one successful purchase.)_
