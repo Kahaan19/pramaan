@@ -1,0 +1,11 @@
+{
+  "intent_id": "intent_7f3a9c",
+  "user_id": "user_kahaan",
+  "max_amount_paise": 200000,
+  "merchant_allowlist": ["merchant_demo_01"],
+  "category": "retail",
+  "expires_at": "2026-09-05T23:59:59Z",
+  "human_present": true,
+  "nonce": "0b91e2d4-1a77-4c8e-9f21-6d3a2c8e5b10",
+  "signature": "<base64 Ed25519 signature over canonical JSON of the fields above, signed by the USER key>"
+}

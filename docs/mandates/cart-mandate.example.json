@@ -1,0 +1,11 @@
+{
+  "cart_id": "cart_2b8d10",
+  "intent_id": "intent_7f3a9c",
+  "merchant_id": "merchant_demo_01",
+  "items": [
+    { "sku": "SKU-TEA-250", "qty": 1, "unit_price_paise": 129900 }
+  ],
+  "total_paise": 129900,
+  "nonce": "5c2f8a19-3e64-4b7d-8a1c-9f0e6d2b4a73",
+  "signature": "<base64 Ed25519 signature over canonical JSON of the fields above, signed by the MERCHANT key>"
+}

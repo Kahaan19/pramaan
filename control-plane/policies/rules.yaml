@@ -1,0 +1,41 @@
+# Pramaan policy-as-code.
+# Evaluated by the deterministic Policy Engine (NO LLM). Human-readable on purpose:
+# a judge should understand your guardrails by reading this file.
+# All money amounts are in integer paise (₹1 = 100 paise).
+
+version: 1
+
+# Hard limits — a violation here is an immediate DENY.
+limits:
+  per_transaction_cap_paise: 200000        # ₹2,000 max single txn
+  velocity:
+    window_seconds: 3600                    # rolling 1 hour
+    max_txns: 5                             # at most 5 money moves / hour / user
+    max_total_paise: 500000                 # at most ₹5,000 / hour / user
+
+# Only these merchants can receive money. Anything else => DENY (goal-hijack defense).
+merchant_allowlist:
+  - merchant_demo_01
+
+# Optional category gating for the allowed merchant.
+allowed_categories:
+  - retail
+  - groceries
+
+# Amounts at or above this require a human approval (STEP_UP), not auto-execute.
+step_up:
+  amount_threshold_paise: 100000            # ₹1,000+ => human in the loop
+  # also step up if the intent was signed in 'human_present: false' (delegated) mode
+  step_up_on_delegated_intent: true
+
+# Mandate freshness.
+mandate:
+  reject_if_expired: true
+  reject_replayed_nonce: true               # each mandate nonce usable once
+
+# Evaluation order (implemented in code, documented here):
+#   1. mandate invalid/expired/replayed        -> DENY
+#   2. any hard limit violated                 -> DENY
+#   3. merchant not allowlisted / bad category -> DENY
+#   4. step_up condition met                   -> STEP_UP
+#   5. otherwise                               -> ALLOW
