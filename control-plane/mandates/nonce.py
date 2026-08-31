@@ -12,9 +12,9 @@ from datetime import datetime, timezone
 
 from sqlalchemy import BigInteger, DateTime, String, UniqueConstraint
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 
-from db import Base
+from db import Base, SessionLocal
 from mandates.errors import MandateError, MandateErrorCode
 
 
@@ -32,18 +32,30 @@ class MandateNonce(Base):
     __table_args__ = (UniqueConstraint("scope", "nonce", name="uq_mandate_nonce_scope_nonce"),)
 
 
-def consume_cart_nonce(db: Session, cart_id: str, nonce: str) -> None:
-    """Atomically consumes a cart nonce. Commits immediately in its own
-    transaction -- NOT left pending in the caller's request-scoped
-    transaction -- so a later policy DENY or an unrelated rollback cannot
-    silently un-burn the mandate. Two concurrent requests with the same
-    nonce are settled by the unique constraint: exactly one succeeds.
+def consume_cart_nonce(cart_id: str, nonce: str) -> None:
+    """Atomically consumes a cart nonce in a dedicated session, deliberately
+    NOT the caller's request-scoped session. A prior version accepted the
+    caller's Session and called db.commit() on it -- which commits
+    EVERYTHING pending on that session, not just the nonce row, and releases
+    any lock (e.g. a Postgres advisory lock) the caller may be holding.
+    Reproduced empirically: a row the caller then rolled back survived.
+
+    Taking no `db` parameter at all makes that class of bug structurally
+    impossible here -- there is no shared session to leak into.
+
+    Two concurrent requests with the same nonce are settled by the unique
+    constraint: exactly one succeeds, the other gets REPLAYED_NONCE.
     """
-    db.add(MandateNonce(scope="cart", nonce=nonce, cart_id=cart_id))
+    session = SessionLocal()
     try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise MandateError(
-            MandateErrorCode.REPLAYED_NONCE, f"cart nonce {nonce!r} (cart_id={cart_id!r}) already consumed"
-        ) from None
+        session.add(MandateNonce(scope="cart", nonce=nonce, cart_id=cart_id))
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            raise MandateError(
+                MandateErrorCode.REPLAYED_NONCE,
+                f"cart nonce {nonce!r} (cart_id={cart_id!r}) already consumed",
+            ) from None
+    finally:
+        session.close()
