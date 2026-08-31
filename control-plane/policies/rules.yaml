@@ -12,12 +12,20 @@ limits:
     window_seconds: 3600                    # rolling 1 hour
     max_txns: 5                             # at most 5 money moves / hour / user
     max_total_paise: 500000                 # at most ₹5,000 / hour / user
+  max_pending_step_ups: 3                   # at most 3 STEP_UP requests awaiting a
+                                             # human per user at once (approval-queue
+                                             # flooding defense)
 
 # Only these merchants can receive money. Anything else => DENY (goal-hijack defense).
 merchant_allowlist:
   - merchant_demo_01
 
-# Optional category gating for the allowed merchant.
+# Category gating. Fails CLOSED: a cart whose intent has no category, or one
+# outside this list, is denied -- an omitted field is never a way to skip a
+# control. HONEST LIMIT: category is a field on the INTENT, which the user's
+# own agent signs -- it is a self-declared purpose label, not a
+# merchant-attested fact. Deriving category from what's actually in the cart
+# (a merchant/SKU registry) is future work.
 allowed_categories:
   - retail
   - groceries
@@ -28,7 +36,10 @@ step_up:
   # also step up if the intent was signed in 'human_present: false' (delegated) mode
   step_up_on_delegated_intent: true
 
-# Mandate freshness.
+# Mandate freshness. NOT actually configurable from here -- both are always
+# enforced in mandates/scope.py and mandates/nonce.py regardless of this
+# file. Listed so the invariant is visible; the loader rejects `false` for
+# either, since that would document a control that isn't real.
 mandate:
   reject_if_expired: true
   reject_replayed_nonce: true               # each CART mandate nonce usable once.
@@ -37,9 +48,17 @@ mandate:
                                              # its own merchant_allowlist, and the
                                              # velocity caps above.
 
-# Evaluation order (implemented in code, documented here):
-#   1. mandate invalid/expired/replayed        -> DENY
-#   2. any hard limit violated                 -> DENY
-#   3. merchant not allowlisted / bad category -> DENY
-#   4. step_up condition met                   -> STEP_UP
-#   5. otherwise                               -> ALLOW
+# The ACTUAL evaluation order, validated at load time to be an exact
+# permutation of the registered rule names (control-plane/policy/rule_names.py)
+# -- so this file and the code cannot silently drift apart. First DENY wins;
+# else the first STEP_UP; else ALLOW.
+evaluation_order:
+  - mandate_expiry
+  - per_transaction_cap
+  - velocity_txn_count
+  - velocity_total_amount
+  - max_pending_step_ups
+  - merchant_allowlist
+  - category
+  - step_up_amount_threshold
+  - step_up_delegated_intent
