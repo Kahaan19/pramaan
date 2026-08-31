@@ -1,52 +1,69 @@
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from db import get_db
-from executor.checkout import run_demo_checkout
+from executor.gate import AllowResult, DenyResult, StepUpResult, mandate_error_status_code, run_gate
 from executor.razorpay_mcp import RazorpayToolError
+from mandates.errors import MandateError
+from mandates.schemas import CartMandate, IntentMandate
 
 router = APIRouter(prefix="/demo", tags=["demo"])
 
 
-class CheckoutRequest(BaseModel):
-    amount_paise: int = Field(gt=0, description="Amount in integer paise, e.g. 1299 for Rs 12.99")
-    idempotency_key: str | None = Field(
-        default=None, description="Reuse to safely retry without double-charging"
-    )
-    description: str | None = None
+class GatedCheckoutRequest(BaseModel):
+    """No amount_paise, no client idempotency_key. extra="forbid" so a body
+    that tries to smuggle either back in is rejected loudly (422) rather
+    than silently ignored -- the charged amount comes ONLY from the signed
+    cart.total_paise, and the idempotency key is ALWAYS derived from
+    cart.cart_id.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent: IntentMandate
+    cart: CartMandate
 
 
-class CheckoutResponse(BaseModel):
-    idempotency_key: str
-    status: str
-    amount_paise: int
-    order_id: str | None
-    payment_link_id: str | None
-    short_url: str | None
-    payment_link_status: str | None
-    payment_id: str | None
-    payment_status: str | None
-    replayed: bool
+def _verdict_dict(verdict) -> dict:
+    return {
+        "decision": verdict.decision.value,
+        "rule_fired": verdict.rule_fired,
+        "reason": verdict.reason,
+        "evaluated_at": verdict.evaluated_at.isoformat(),
+        "rules_version": verdict.rules_version,
+        "rules_sha256": verdict.rules_sha256,
+    }
 
 
-@router.post("/checkout", response_model=CheckoutResponse)
-async def checkout(body: CheckoutRequest, db: Session = Depends(get_db)) -> CheckoutResponse:
-    # NOTE: this endpoint is still the ungated Phase 0 spine -- no mandate or
-    # policy gate in front of it yet. cart_id is a throwaway stand-in for the
-    # duration of the fix(executor) commit; Phase 2's gate (executor/gate.py)
-    # replaces this whole request/response shape with one driven by a signed
-    # cart, at which point cart_id becomes the real mandate cart_id.
-    cart_id = body.idempotency_key or uuid.uuid4().hex
+@router.post("/checkout")
+async def checkout(body: GatedCheckoutRequest, db: Session = Depends(get_db)) -> JSONResponse:
     try:
-        result = await run_demo_checkout(
-            db=db,
-            cart_id=cart_id,
-            amount_paise=body.amount_paise,
-            description=body.description,
+        result = await run_gate(db, body.intent, body.cart)
+    except MandateError as exc:
+        return JSONResponse(
+            status_code=mandate_error_status_code(exc.code),
+            content={"error_code": exc.code.value, "detail": exc.message},
         )
     except RazorpayToolError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return CheckoutResponse(**result)
+
+    if isinstance(result, DenyResult):
+        return JSONResponse(status_code=403, content={"verdict": _verdict_dict(result.verdict)})
+
+    if isinstance(result, StepUpResult):
+        return JSONResponse(
+            status_code=202,
+            content={
+                "verdict": _verdict_dict(result.verdict),
+                "step_up_request_id": result.step_up_request_id,
+                "cart_id": body.cart.cart_id,
+            },
+        )
+
+    assert isinstance(result, AllowResult)
+    return JSONResponse(
+        status_code=200,
+        content={"verdict": _verdict_dict(result.verdict), "checkout": result.checkout},
+    )

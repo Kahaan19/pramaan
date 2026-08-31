@@ -5,12 +5,14 @@ never enter this process -- they live wherever the user/merchant sign from
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 from nacl.encoding import Base64Encoder
 from nacl.exceptions import BadSignatureError
 from nacl.signing import SigningKey, VerifyKey
 
+from config import get_settings
 from mandates.canonical import signing_bytes
 from mandates.errors import MandateError, MandateErrorCode
 from mandates.schemas import UnsignedCartMandate, UnsignedIntentMandate
@@ -74,6 +76,12 @@ class Keyring:
                 MandateErrorCode.UNKNOWN_SIGNER,
                 f"no registered merchant key for merchant_id={merchant_id!r}",
             ) from None
+
+
+@lru_cache
+def get_keyring() -> Keyring:
+    """The service's Keyring, loaded once from MANDATE_KEYRING_DIR."""
+    return Keyring.from_dir(Path(get_settings().mandate_keyring_dir))
 
 
 def sign_mandate(

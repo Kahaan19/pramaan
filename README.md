@@ -22,9 +22,6 @@ See `ARCHITECTURE.md`. Threat-model → control mapping in `docs/`.
 
 ## Run
 
-**Phase 0 spine only** — proves the Razorpay money path works. No mandates or policy
-gate in front of it yet; that lands in Phases 1–2.
-
 ### Clone
 ```
 git clone https://github.com/Kahaan19/pramaan.git
@@ -36,35 +33,42 @@ cd pramaan
    `docker exec pramaan-db psql -U postgres -c "CREATE DATABASE pramaan"`).
 2. `.env` filled in from `.env.example` (test-mode Razorpay keys + `RAZORPAY_MERCHANT_TOKEN`).
 3. `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
-4. `uvicorn main:app --app-dir control-plane --reload`
-5. `curl -X POST localhost:8000/demo/checkout -H "Content-Type: application/json" \
-   -d '{"amount_paise": 1299, "description": "test purchase"}'`
+4. `python scripts/generate_keys.py` — writes demo user (`user_kahaan`) + merchant
+   (`merchant_demo_01`) Ed25519 keypairs to `secrets/` (gitignored; the control plane loads
+   only the public halves).
+5. `uvicorn main:app --app-dir control-plane --reload`
+6. `pytest` — 117 tests: mandate signatures/scope/replay, policy rules/purity, and the
+   gated checkout flow (executor mocked, no live Razorpay calls in tests).
 
-Returns a real test-mode Razorpay order + payment link (`order_id`, `payment_link_id`,
-`short_url`, statuses). Passing the same `idempotency_key` on a retry returns the exact
-same references instead of creating a second order/link — verified live, no double-charge.
+**`POST /demo/checkout` is now the full gate**: mandate verification → policy evaluation →
+executor. The body is `{"intent": <signed Intent Mandate>, "cart": <signed Cart Mandate>}` —
+no raw `amount_paise` field exists; the charged amount comes only from the signed
+`cart.total_paise`. Responses: `200` (`ALLOW`, with real Razorpay refs), `202` (`STEP_UP`,
+nothing executed yet — Phase 4 adds the human approval queue), `403` (`DENY`, or a mandate
+failure), `409` (a replayed cart nonce), `422` (malformed request).
 
-**Note on the chain:** the live MCP server has no `payment_link_upi_create` tool, and its
-S2S UPI tool (`initiate_payment`) 404s on standard test accounts (needs separate Razorpay
-approval). So the automated chain is `create_order` → `create_payment_link` →
+Live-verified against Razorpay test mode: a ₹1,299 cart returns `202 STEP_UP`
+(`step_up_amount_threshold`) with zero Razorpay calls; a sub-₹1,000 cart returns `200 ALLOW`
+with a real `order_id`/`short_url`; a cart over the ₹2,000 platform cap returns `403 DENY`
+(`per_transaction_cap`) with zero Razorpay calls; a forged cart reusing an already-consumed
+nonce returns `409`.
+
+**Note on the Razorpay chain:** the live MCP server has no `payment_link_upi_create` tool,
+and its S2S UPI tool (`initiate_payment`) 404s on standard test accounts (needs separate
+Razorpay approval). So the automated chain is `create_order` → `create_payment_link` →
 `fetch_payment_link`, with `fetch_payment` only called once the link shows an actual
-payment — honest limit of a fully automated, no-human-clicks-a-link demo endpoint.
+payment — honest limit of a fully automated, no-human-clicks-a-link demo endpoint. Velocity
+limits therefore meter *authorized spend commitments* (a payment link created under a
+passing verdict), not settled payments — the executor never observes a completed payment,
+so "count only completed money" would count nothing.
 
-### Mandate layer (Phase 1)
-
-Ed25519-signed Intent + Cart mandates live in `control-plane/mandates/`, with full
-signature/scope verification and cart-nonce replay protection — but **not yet wired into
-`/demo/checkout`**; that gate lands in Phase 2 alongside the policy engine.
-
-```
-python scripts/generate_keys.py          # writes demo user + merchant keypairs to secrets/
-pytest                                    # 40 tests: signatures, scope, canonicalization, replay
-```
-
-`secrets/` is gitignored — the control plane's `Keyring` loads only the generated public
-keys (`*.pub` + a `*.id` sidecar naming the owner); private keys never enter the verifier.
-Tests use ephemeral in-memory keypairs and never touch `secrets/`, so `pytest` works on a
-fresh clone with no keygen step.
+**Honest scoping note on `category`:** the policy engine's `allowed_categories` rule reads
+`category` off the **Intent** Mandate, which the *user's own agent* signs. It is a
+self-declared purpose label, not a merchant-attested fact — a compromised agent holding a
+valid intent can pick its own category. Deriving category from what's actually in the cart
+(a merchant/SKU registry) is future work; the rule still fails closed (an absent or
+disallowed category is denied) because an omitted field must never be a way to skip a
+control.
 
 ## Demo
 _(Filled during Phase 5: the three blocked attacks + one successful purchase.)_
