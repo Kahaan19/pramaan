@@ -21,11 +21,12 @@ class CheckoutRequest(BaseModel):
 
 class CheckoutResponse(BaseModel):
     idempotency_key: str
+    status: str
     amount_paise: int
-    order_id: str
-    payment_link_id: str
-    short_url: str
-    payment_link_status: str
+    order_id: str | None
+    payment_link_id: str | None
+    short_url: str | None
+    payment_link_status: str | None
     payment_id: str | None
     payment_status: str | None
     replayed: bool
@@ -33,12 +34,17 @@ class CheckoutResponse(BaseModel):
 
 @router.post("/checkout", response_model=CheckoutResponse)
 async def checkout(body: CheckoutRequest, db: Session = Depends(get_db)) -> CheckoutResponse:
-    idempotency_key = body.idempotency_key or uuid.uuid4().hex
+    # NOTE: this endpoint is still the ungated Phase 0 spine -- no mandate or
+    # policy gate in front of it yet. cart_id is a throwaway stand-in for the
+    # duration of the fix(executor) commit; Phase 2's gate (executor/gate.py)
+    # replaces this whole request/response shape with one driven by a signed
+    # cart, at which point cart_id becomes the real mandate cart_id.
+    cart_id = body.idempotency_key or uuid.uuid4().hex
     try:
         result = await run_demo_checkout(
             db=db,
+            cart_id=cart_id,
             amount_paise=body.amount_paise,
-            idempotency_key=idempotency_key,
             description=body.description,
         )
     except RazorpayToolError as exc:
