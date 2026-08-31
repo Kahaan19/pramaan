@@ -71,7 +71,7 @@ docs/                   diagrams, threat-model → control mapping, mandate exam
 
 ## Build phase tracker (update as we go)
 - [x] Phase 0 — Spine: FastAPI + Postgres + Razorpay MCP; one order→UPI link→fetch works
-- [ ] Phase 1 — Mandates: Ed25519 sign/verify + scope check
+- [x] Phase 1 — Mandates: Ed25519 sign/verify + scope check
 - [ ] Phase 2 — Policy engine: deterministic rules + verdicts + tests
 - [ ] Phase 3 — Ledger: hash chain + explain() API
 - [ ] Phase 4 — HITL + dashboard

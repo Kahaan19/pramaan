@@ -50,6 +50,22 @@ approval). So the automated chain is `create_order` → `create_payment_link` �
 `fetch_payment_link`, with `fetch_payment` only called once the link shows an actual
 payment — honest limit of a fully automated, no-human-clicks-a-link demo endpoint.
 
+### Mandate layer (Phase 1)
+
+Ed25519-signed Intent + Cart mandates live in `control-plane/mandates/`, with full
+signature/scope verification and cart-nonce replay protection — but **not yet wired into
+`/demo/checkout`**; that gate lands in Phase 2 alongside the policy engine.
+
+```
+python scripts/generate_keys.py          # writes demo user + merchant keypairs to secrets/
+pytest                                    # 40 tests: signatures, scope, canonicalization, replay
+```
+
+`secrets/` is gitignored — the control plane's `Keyring` loads only the generated public
+keys (`*.pub` + a `*.id` sidecar naming the owner); private keys never enter the verifier.
+Tests use ephemeral in-memory keypairs and never touch `secrets/`, so `pytest` works on a
+fresh clone with no keygen step.
+
 ## Demo
 _(Filled during Phase 5: the three blocked attacks + one successful purchase.)_
 

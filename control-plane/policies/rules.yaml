@@ -31,7 +31,11 @@ step_up:
 # Mandate freshness.
 mandate:
   reject_if_expired: true
-  reject_replayed_nonce: true               # each mandate nonce usable once
+  reject_replayed_nonce: true               # each CART mandate nonce usable once.
+                                             # The Intent mandate is reusable until
+                                             # it expires -- bounded by max_amount_paise,
+                                             # its own merchant_allowlist, and the
+                                             # velocity caps above.
 
 # Evaluation order (implemented in code, documented here):
 #   1. mandate invalid/expired/replayed        -> DENY
