@@ -231,7 +231,7 @@ async def run_gate(
             cart_signature=cart.signature,
             mandate_error_code=exc.code.value,
             mandate_error_message=exc.message,
-            explanation=f"mandate verification failed ({exc.code.value}): {exc.message}",
+            explanation=f"({exc.code.value}) {exc.message}",
         )
         raise
 
@@ -248,7 +248,7 @@ async def run_gate(
         intent_signature=intent.signature,
         cart_digest=cart_digest,
         cart_signature=cart.signature,
-        explanation="signed intent and cart mandates verified; cart is within the intent's scope",
+        explanation="cart is within the intent's scope",
     )
 
     try:
@@ -263,7 +263,7 @@ async def run_gate(
             actor=intent.user_id,
             mandate_error_code=exc.code.value,
             mandate_error_message=exc.message,
-            explanation=f"replay rejected: {exc.message}",
+            explanation=exc.message,
         )
         raise
 
@@ -326,7 +326,7 @@ async def run_gate(
             actor=intent.user_id,
             decision=verdict.decision.value,
             rule_fired=verdict.rule_fired,
-            explanation=f"queued for human approval (rule {verdict.rule_fired}): {verdict.reason}",
+            explanation=f"(rule {verdict.rule_fired}) {verdict.reason}",
         )
         return StepUpResult(verdict=verdict, step_up_request_id=step_up_row.id)
 
@@ -347,7 +347,7 @@ async def run_gate(
         intent_id=intent.intent_id,
         actor=intent.user_id,
         amount_paise=cart.total_paise,
-        explanation=f"{cart.total_paise} paise reserved against velocity before execution",
+        explanation=f"{cart.total_paise} paise reserved against the hourly velocity budget",
     )
 
     try:

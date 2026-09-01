@@ -105,10 +105,18 @@ def render_narrative(
         )
 
     first_bad_seq = chain.first_bad_seq
-    narrative = tuple(
-        _narrate_entry(e, verified=(first_bad_seq is None or e.seq < first_bad_seq)) for e in entries
-    )
-    headline = _headline(entries, unverified=first_bad_seq is not None and entries[0].seq >= first_bad_seq)
+    is_verified = (lambda e: first_bad_seq is None or e.seq < first_bad_seq)
+    narrative = tuple(_narrate_entry(e, verified=is_verified(e)) for e in entries)
+
+    # The headline must be derived ONLY from verified entries -- scanning the
+    # full (possibly-tampered) set would let a single altered row (e.g. the
+    # POLICY_VERDICT row itself) keep confidently reporting "ALLOWED" even
+    # though the row that proves it can no longer be trusted. Verified here
+    # in this session: without this filter, tampering with exactly that row
+    # left the headline saying "ALLOWED" while every line under it correctly
+    # said UNVERIFIED -- the worst possible inconsistency for this feature.
+    verified_entries = tuple(e for e in entries if is_verified(e))
+    headline = _headline(verified_entries, chain_broken=not chain.ok)
 
     integrity_status = "OK" if chain.ok else "BROKEN"
     integrity_findings = tuple(f"{f.kind} at seq={f.seq}: {f.detail}" for f in chain.findings)
@@ -124,21 +132,35 @@ def render_narrative(
     )
 
 
-def _headline(entries: tuple[LedgerEntry, ...], unverified: bool) -> str:
-    if unverified:
-        return "CHAIN INTEGRITY BROKEN. This transaction's rows could not be verified -- treat any conclusion below with suspicion."
-    if any(e.decision == "DENY" for e in entries):
-        return "BLOCKED. No money moved."
-    if any(e.event_type == "EXECUTION_COMMITTED" for e in entries):
-        refs = next((e.razorpay_refs for e in reversed(entries) if e.razorpay_refs), None)
-        return f"ALLOWED. Payment link created ({refs})." if refs else "ALLOWED. Payment link created."
-    if any(e.event_type == "STEP_UP_QUEUED" for e in entries):
-        return "PENDING HUMAN APPROVAL. No money has moved yet."
-    if any(e.event_type == "EXECUTION_FAILED" for e in entries):
-        return "EXECUTION FAILED. The payment attempt did not complete."
-    if any(e.event_type == "IDEMPOTENT_REPLAY" for e in entries):
-        return "REPLAY. This is a duplicate of an earlier request; see its cached outcome below."
-    return "OUTCOME UNCLEAR from the recorded events."
+def _headline(verified_entries: tuple[LedgerEntry, ...], chain_broken: bool) -> str:
+    """`verified_entries` has ALREADY been filtered to exclude anything at or
+    after the first bad seq -- this function must never see a tampered row,
+    so it can never confidently restate a claim that row was tampered to
+    make.
+    """
+    if not verified_entries:
+        return "CHAIN INTEGRITY BROKEN. No verified rows remain for this transaction -- no conclusion can be drawn."
+
+    if any(e.decision == "DENY" for e in verified_entries):
+        headline = "BLOCKED. No money moved."
+    elif any(e.event_type == "EXECUTION_COMMITTED" for e in verified_entries):
+        refs = next((e.razorpay_refs for e in reversed(verified_entries) if e.razorpay_refs), None)
+        headline = f"ALLOWED. Payment link created ({refs})." if refs else "ALLOWED. Payment link created."
+    elif any(e.event_type == "STEP_UP_QUEUED" for e in verified_entries):
+        headline = "PENDING HUMAN APPROVAL. No money has moved yet."
+    elif any(e.event_type == "EXECUTION_FAILED" for e in verified_entries):
+        headline = "EXECUTION FAILED. The payment attempt did not complete."
+    elif any(e.event_type == "IDEMPOTENT_REPLAY" for e in verified_entries):
+        headline = "REPLAY. This is a duplicate of an earlier request; see its cached outcome below."
+    else:
+        headline = "OUTCOME UNCLEAR from the recorded events."
+
+    if chain_broken:
+        # A verified prefix still exists and is reflected above, but rows
+        # were tampered with somewhere in this chain -- say so, every time,
+        # never silently.
+        headline += " NOTE: this ledger's chain integrity is broken (see below); later details are unverified."
+    return headline
 
 
 def _narrate_entry(entry: LedgerEntry, verified: bool) -> str:

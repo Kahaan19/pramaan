@@ -124,6 +124,40 @@ def test_explain_reports_broken_chain_first_and_loud(clean_ledger):
     assert all("UNVERIFIED" in line for line in result.narrative)  # every row is at/after the bad seq
 
 
+def test_headline_does_not_confidently_restate_a_tampered_decisive_row(clean_ledger):
+    """Regression: tampering with the POLICY_VERDICT row specifically (not
+    the first row in the transaction) must not leave the headline still
+    confidently saying "ALLOWED" -- that row is the ONLY evidence for the
+    claim, and it can no longer be trusted. Caught live in this session: the
+    first version of this fix filtered narrative lines but not the headline,
+    so the narrative correctly said UNVERIFIED while the headline still said
+    ALLOWED one line above it.
+    """
+    from sqlalchemy import text
+
+    txid = str(uuid.uuid4())
+    _append(event_type=LedgerEvent.REQUEST_RECEIVED, transaction_id=txid, explanation="received")
+    verdict_row = _append(
+        event_type=LedgerEvent.POLICY_VERDICT,
+        transaction_id=txid,
+        decision="ALLOW",
+        explanation="within limits",
+    )
+    _append(event_type=LedgerEvent.EXECUTION_COMMITTED, transaction_id=txid, explanation="order created")
+
+    clean_ledger.execute(text("ALTER TABLE ledger_rows DISABLE TRIGGER ledger_rows_no_update_delete"))
+    clean_ledger.execute(
+        text("UPDATE ledger_rows SET payload_canonical = payload_canonical || ' ' WHERE id = :id"),
+        {"id": verdict_row.id},
+    )
+    clean_ledger.execute(text("ALTER TABLE ledger_rows ENABLE TRIGGER ledger_rows_no_update_delete"))
+    clean_ledger.commit()
+
+    result = explain(clean_ledger, txid)
+    assert "ALLOWED" not in result.headline
+    assert "integrity is broken" in result.headline or "CHAIN INTEGRITY BROKEN" in result.headline
+
+
 def test_render_narrative_is_pure_given_precomputed_chain(clean_ledger):
     """render_narrative itself takes already-loaded data and does no I/O --
     proven by calling it twice with the SAME (entries, chain) inputs handed
