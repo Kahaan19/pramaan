@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from nacl.signing import SigningKey
+from sqlalchemy import text
 
 import mandates.nonce  # noqa: F401 - registers mandate_nonces on Base.metadata
 from db import Base, SessionLocal, engine
@@ -98,6 +99,30 @@ def db_session():
         yield session
     finally:
         session.close()
+
+
+@pytest.fixture
+def clean_ledger(db_session):
+    """ledger_rows is a single GLOBAL sequential chain, unlike every other
+    table in this project -- per-test-unique ids (the strategy used
+    elsewhere, e.g. test_gate.py) don't help a test that needs to assert a
+    specific seq, a genesis row, or a clean witness-reconciliation result.
+    Reset to empty via the DB-side escape hatch (disables the append-only
+    triggers just long enough to truncate, then re-enables them) rather than
+    ever letting application code do it. Also truncates the tables
+    verify_chain()'s witness check reads (spend_reservations,
+    step_up_requests, demo_checkouts) -- safe because no test anywhere in
+    this suite depends on another test's rows surviving across test
+    boundaries; every other test already scopes its own assertions to
+    freshly-generated random ids.
+    """
+    import ledger.models  # noqa: F401 - registers ledger_rows + triggers on Base.metadata
+
+    Base.metadata.create_all(bind=engine)
+    db_session.execute(text("SELECT ledger_reset_for_tests()"))
+    db_session.execute(text("TRUNCATE spend_reservations, step_up_requests, demo_checkouts, mandate_nonces"))
+    db_session.commit()
+    yield db_session
 
 
 @pytest.fixture(scope="session")
