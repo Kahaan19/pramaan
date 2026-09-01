@@ -4,12 +4,25 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from db import get_db
-from executor.gate import AllowResult, DenyResult, StepUpResult, mandate_error_status_code, run_gate
+from executor.gate import (
+    AllowResult,
+    DenyResult,
+    ReplayResult,
+    StepUpResult,
+    mandate_error_status_code,
+    run_gate,
+)
 from executor.razorpay_mcp import RazorpayToolError
 from mandates.errors import MandateError
 from mandates.schemas import CartMandate, IntentMandate
 
 router = APIRouter(prefix="/demo", tags=["demo"])
+
+# A cached (previously-executed) checkout's status maps to the HTTP status a
+# caller would have gotten had they somehow reached this state fresh --
+# COMMITTED looks like success, FAILED looks like the executor error it is,
+# IN_FLIGHT means a concurrent duplicate is still being processed.
+_REPLAY_STATUS_CODES = {"COMMITTED": 200, "FAILED": 502, "IN_FLIGHT": 409}
 
 
 class GatedCheckoutRequest(BaseModel):
@@ -39,15 +52,32 @@ def _verdict_dict(verdict) -> dict:
 
 @router.post("/checkout")
 async def checkout(body: GatedCheckoutRequest, db: Session = Depends(get_db)) -> JSONResponse:
+    # `except*` cannot contain `return`/`break`/`continue` (a language
+    # restriction on except* blocks), so the MandateError branch stashes its
+    # response and returns after the try/except* statement instead.
+    mandate_error_response: JSONResponse | None = None
+
     try:
         result = await run_gate(db, body.intent, body.cart)
-    except MandateError as exc:
-        return JSONResponse(
+    except* MandateError as eg:
+        # except* (not a plain except) because executor/gate.py and
+        # executor/checkout.py both use except* around the Razorpay call, and
+        # except* always binds an ExceptionGroup -- even for a single plain
+        # exception -- so a plain `except MandateError` here would stop
+        # matching once those changes landed. len==1 is the expected case
+        # (verify_mandate_chain raises at most one MandateError); a genuine
+        # multi-exception group is unexpected and reported via its first error.
+        exc = eg.exceptions[0]
+        mandate_error_response = JSONResponse(
             status_code=mandate_error_status_code(exc.code),
             content={"error_code": exc.code.value, "detail": exc.message},
         )
-    except RazorpayToolError as exc:
+    except* RazorpayToolError as eg:
+        exc = eg.exceptions[0]
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if mandate_error_response is not None:
+        return mandate_error_response
 
     if isinstance(result, DenyResult):
         return JSONResponse(status_code=403, content={"verdict": _verdict_dict(result.verdict)})
@@ -61,6 +91,10 @@ async def checkout(body: GatedCheckoutRequest, db: Session = Depends(get_db)) ->
                 "cart_id": body.cart.cart_id,
             },
         )
+
+    if isinstance(result, ReplayResult):
+        status_code = _REPLAY_STATUS_CODES.get(result.checkout["status"], 409)
+        return JSONResponse(status_code=status_code, content={"checkout": result.checkout, "replayed": True})
 
     assert isinstance(result, AllowResult)
     return JSONResponse(

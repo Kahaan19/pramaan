@@ -36,7 +36,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from executor.checkout import idempotency_key_for_cart, run_demo_checkout
-from executor.razorpay_mcp import RazorpayToolError
+from executor.razorpay_mcp import reraise_unwrapped
 from executor.spend import load_recent_spend, mark_committed, mark_failed, reserve_spend
 from executor.step_up import count_pending, create_step_up_request
 from mandates.errors import MandateErrorCode
@@ -91,7 +91,21 @@ class AllowResult:
     checkout: dict
 
 
-GateResult = DenyResult | StepUpResult | AllowResult
+@dataclass(frozen=True)
+class ReplayResult:
+    """A prior attempt against this exact cart already exists. Deliberately
+    carries NO verdict -- a replay is not a fresh policy decision, and an
+    earlier version of this code fabricated a synthetic Decision.ALLOW here
+    regardless of the cached row's actual status, which meant a cached
+    FAILED or IN_FLIGHT checkout was reported to the caller as a success.
+    `checkout["status"]` is the cached row's real, current status; the
+    caller (routers/demo.py) maps it to an honest HTTP status.
+    """
+
+    checkout: dict
+
+
+GateResult = DenyResult | StepUpResult | AllowResult | ReplayResult
 
 
 def _acquire_user_lock(db: Session, user_id: str) -> None:
@@ -116,21 +130,9 @@ async def run_gate(
     idempotency_key = idempotency_key_for_cart(cart.cart_id)
     existing = db.query(DemoCheckout).filter(DemoCheckout.idempotency_key == idempotency_key).one_or_none()
     if existing is not None:
-        # Re-derive a verdict-shaped result isn't possible for a replay (the
-        # original verdict wasn't persisted on this row), but the checkout
-        # itself is idempotent -- report ALLOW with the cached refs.
-        return AllowResult(
-            verdict=Verdict(
-                decision=Decision.ALLOW,
-                rule_fired=None,
-                reason="replayed: returning the cached result for this cart",
-                evaluated_at=now,
-                all_violations=(),
-                rules_version=get_rules_config()[0].version,
-                rules_sha256=get_rules_config()[1],
-            ),
-            checkout=_checkout_response(existing, replayed=True),
-        )
+        # No fresh policy decision was made -- report the cached row's ACTUAL
+        # status (COMMITTED, FAILED, or IN_FLIGHT), not a fabricated verdict.
+        return ReplayResult(checkout=_checkout_response(existing, replayed=True))
 
     _acquire_user_lock(db, intent.user_id)
 
@@ -179,9 +181,14 @@ async def run_gate(
             amount_paise=cart.total_paise,
             description=describe_cart(cart),
         )
-    except RazorpayToolError:
+    except* Exception as eg:
+        # Same reasoning as executor/checkout.py's except* -- defense in
+        # depth in case a wrapped exception somehow escapes checkout.py's own
+        # handling. Any failure here must mark the reservation FAILED, never
+        # leave it PENDING (which would count against the user's velocity
+        # budget forever with no corresponding audit).
         mark_failed(db, reservation)
-        raise
+        reraise_unwrapped(eg)
 
     mark_committed(db, reservation, checkout["payment_link_id"])
     return AllowResult(verdict=verdict, checkout=checkout)

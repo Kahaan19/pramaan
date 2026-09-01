@@ -8,7 +8,7 @@ from nacl.signing import SigningKey
 from sqlalchemy import select
 
 from executor import gate as gate_module
-from executor.gate import AllowResult, DenyResult, StepUpResult, run_gate
+from executor.gate import AllowResult, DenyResult, ReplayResult, StepUpResult, run_gate
 from executor.spend import SpendReservation
 from executor.step_up import StepUpRequest
 from mandates.errors import MandateError, MandateErrorCode
@@ -98,6 +98,39 @@ def test_allow_executes_and_writes_committed_reservation(user_signing_key, merch
     ).scalar_one()
     assert reservation.status == "COMMITTED"
     assert reservation.amount_paise == 50000
+
+
+def test_exception_group_from_executor_still_marks_reservation_failed(
+    user_signing_key, merchant_signing_key, db_session, monkeypatch
+):
+    """Stage 3a regression: an ExceptionGroup escaping run_demo_checkout (the
+    mcp SDK's anyio transport wraps exceptions this way -- confirmed live
+    earlier this session) must still mark the reservation FAILED, and the
+    original RazorpayToolError must still be the thing that comes out --
+    not an ExceptionGroup a plain `except RazorpayToolError` would miss.
+    """
+    from executor.razorpay_mcp import RazorpayToolError
+
+    async def _raise_wrapped(*args, **kwargs):
+        raise ExceptionGroup("simulated anyio failure", [RazorpayToolError("create_order", "boom")])
+
+    monkeypatch.setattr(gate_module, "run_demo_checkout", _raise_wrapped)
+
+    user_id, keyring = _fresh_user_and_keyring(user_signing_key, merchant_signing_key)
+    intent, cart = _make_pair(
+        user_id,
+        user_signing_key,
+        merchant_signing_key,
+        cart_overrides={"total_paise": 50000, "items": [{"sku": "X", "qty": 1, "unit_price_paise": 50000}]},
+    )
+
+    with pytest.raises(RazorpayToolError):
+        asyncio.run(run_gate(db_session, intent, cart, keyring=keyring))
+
+    reservation = db_session.execute(
+        select(SpendReservation).where(SpendReservation.cart_id == cart.cart_id)
+    ).scalar_one()
+    assert reservation.status == "FAILED"
 
 
 def test_deny_calls_no_executor_and_writes_no_reservation(
@@ -224,7 +257,8 @@ def test_same_cart_twice_hits_idempotency_cache_executor_called_once(
     result2 = asyncio.run(run_gate(db_session, intent, cart, keyring=keyring))
 
     assert isinstance(result1, AllowResult)
-    assert isinstance(result2, AllowResult)
+    assert isinstance(result2, ReplayResult)  # no fresh policy decision on a replay
+    assert result2.checkout["status"] == "COMMITTED"
     assert result2.checkout["replayed"] is True
     assert call_count == 1
 
@@ -303,3 +337,46 @@ def test_request_body_rejects_client_supplied_amount_paise():
     }
     response = client.post("/demo/checkout", json=body)
     assert response.status_code == 422
+
+
+def test_router_maps_mandate_error_to_correct_status(user_signing_key, merchant_signing_key, db_session, monkeypatch):
+    """Stage 3a regression: routers/demo.py switched from `except MandateError`
+    to `except* MandateError` (required because executor/gate.py's own
+    except* means a MandateError could theoretically arrive wrapped). Calls
+    the endpoint function directly with a mocked run_gate, so it needs no
+    real keys on disk.
+    """
+    import routers.demo as demo_module
+    from mandates.errors import MandateError, MandateErrorCode
+
+    async def _raise_replayed_nonce(*args, **kwargs):
+        raise MandateError(MandateErrorCode.REPLAYED_NONCE, "already consumed")
+
+    monkeypatch.setattr(demo_module, "run_gate", _raise_replayed_nonce)
+
+    user_id, keyring = _fresh_user_and_keyring(user_signing_key, merchant_signing_key)
+    intent, cart = _make_pair(user_id, user_signing_key, merchant_signing_key)
+    body = demo_module.GatedCheckoutRequest(intent=intent, cart=cart)
+
+    response = asyncio.run(demo_module.checkout(body, db_session))
+    assert response.status_code == 409
+
+
+def test_router_maps_razorpay_error_to_502(user_signing_key, merchant_signing_key, db_session, monkeypatch):
+    import routers.demo as demo_module
+    from executor.razorpay_mcp import RazorpayToolError
+
+    async def _raise_razorpay_error(*args, **kwargs):
+        raise RazorpayToolError("create_order", "boom")
+
+    monkeypatch.setattr(demo_module, "run_gate", _raise_razorpay_error)
+
+    user_id, keyring = _fresh_user_and_keyring(user_signing_key, merchant_signing_key)
+    intent, cart = _make_pair(user_id, user_signing_key, merchant_signing_key)
+    body = demo_module.GatedCheckoutRequest(intent=intent, cart=cart)
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(demo_module.checkout(body, db_session))
+    assert exc_info.value.status_code == 502

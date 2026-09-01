@@ -6,7 +6,7 @@ Phase 0 has no mandate/policy gate in front of it yet — Phase 2 adds that.
 
 import json
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, NoReturn
 
 from mcp import ClientSession
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
@@ -20,6 +20,22 @@ class RazorpayToolError(RuntimeError):
     def __init__(self, tool: str, message: str):
         super().__init__(f"{tool} failed: {message}")
         self.tool = tool
+
+
+def reraise_unwrapped(eg: BaseExceptionGroup) -> NoReturn:
+    """`except*` always binds an ExceptionGroup, even when exactly one plain
+    exception was raised (confirmed: `raise RazorpayToolError(...)` inside a
+    try/except* block arrives here as a 1-element group). Re-raising the
+    group as-is would turn every RazorpayToolError/MandateError into an
+    ExceptionGroup for every caller using a plain `except SomeError:` --
+    unwrap back to the original exception whenever there's exactly one, so
+    existing `except RazorpayToolError` / `except MandateError` handlers
+    upstream keep matching unchanged. A genuine multi-exception group (rare)
+    is re-raised as-is; callers fall back to a generic 500/502.
+    """
+    if len(eg.exceptions) == 1 and not isinstance(eg.exceptions[0], BaseExceptionGroup):
+        raise eg.exceptions[0] from None
+    raise eg
 
 
 def _parse_tool_result(tool: str, result: Any) -> dict:

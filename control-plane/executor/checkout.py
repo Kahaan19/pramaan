@@ -19,6 +19,12 @@ length allowance.
 No policy gate here (Phase 2 policy/ + executor/gate.py sit in front of this).
 This module is the sole money path; it does not decide whether a transaction
 is *allowed*, only how to execute one that already has been.
+
+A replay of this function (the `existing is not None` returns below) reports
+the CACHED row's actual status verbatim -- including FAILED or IN_FLIGHT.
+Callers must not assume a replay means success; see executor/gate.py's
+ReplayResult, which exists specifically because an earlier version of this
+codebase fabricated an ALLOW verdict for any replay regardless of status.
 """
 
 import hashlib
@@ -26,7 +32,7 @@ import hashlib
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from executor.razorpay_mcp import RazorpayToolError, call_tool, razorpay_session
+from executor.razorpay_mcp import call_tool, razorpay_session, reraise_unwrapped
 from models import DemoCheckout
 
 
@@ -123,10 +129,19 @@ async def run_demo_checkout(
             if payment_id:
                 payment = await call_tool(session, "fetch_payment", {"payment_id": payment_id})
                 payment_status = payment.get("status")
-    except RazorpayToolError:
+    except* Exception as eg:
+        # `except*` (not a plain `except RazorpayToolError`) because the mcp
+        # SDK's transport runs on anyio task groups, which wrap ANY exception
+        # raised inside -- including RazorpayToolError -- in a
+        # BaseExceptionGroup. A plain `except RazorpayToolError` misses that
+        # wrapped case entirely (confirmed live in this session: a JSON parse
+        # error surfaced as an unhandled ExceptionGroup), leaving this row
+        # stuck IN_FLIGHT forever with no record of the failure. Catching
+        # `Exception` (not just RazorpayToolError) is deliberate too: ANY
+        # failure here must mark the row FAILED, not just a Razorpay-shaped one.
         row.status = "FAILED"
         db.commit()
-        raise
+        reraise_unwrapped(eg)
 
     row.order_id = order["id"]
     row.payment_link_id = link["id"]
