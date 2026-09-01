@@ -23,7 +23,7 @@ def test_replay_of_failed_checkout_reports_failed_status(db_session):
     db_session.add(DemoCheckout(idempotency_key=key, cart_id=cart_id, status="FAILED", amount_paise=5000))
     db_session.commit()
 
-    result = _run(run_demo_checkout(db_session, cart_id=cart_id, amount_paise=5000, description="x"))
+    result = _run(run_demo_checkout(db_session, cart_id=cart_id, amount_paise=5000, description="x", transaction_id="tx-" + cart_id))
 
     assert result["status"] == "FAILED"
     assert result["replayed"] is True
@@ -35,7 +35,7 @@ def test_replay_of_in_flight_checkout_reports_in_flight_status(db_session):
     db_session.add(DemoCheckout(idempotency_key=key, cart_id=cart_id, status="IN_FLIGHT", amount_paise=5000))
     db_session.commit()
 
-    result = _run(run_demo_checkout(db_session, cart_id=cart_id, amount_paise=5000, description="x"))
+    result = _run(run_demo_checkout(db_session, cart_id=cart_id, amount_paise=5000, description="x", transaction_id="tx-" + cart_id))
 
     assert result["status"] == "IN_FLIGHT"
     assert result["replayed"] is True
@@ -56,7 +56,7 @@ def test_wrapped_exception_group_still_marks_row_failed_and_unwraps(db_session, 
 
     cart_id = "cart_" + uuid.uuid4().hex
     with pytest.raises(RazorpayToolError):
-        _run(run_demo_checkout(db_session, cart_id=cart_id, amount_paise=5000, description="x"))
+        _run(run_demo_checkout(db_session, cart_id=cart_id, amount_paise=5000, description="x", transaction_id="tx-" + cart_id))
 
     row = db_session.execute(
         select(DemoCheckout).where(DemoCheckout.idempotency_key == idempotency_key_for_cart(cart_id))

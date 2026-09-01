@@ -28,11 +28,15 @@ codebase fabricated an ALLOW verdict for any replay regardless of status.
 """
 
 import hashlib
+from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from executor.razorpay_mcp import call_tool, razorpay_session, reraise_unwrapped
+from ledger.events import LedgerEvent
+from ledger.writer import append_event_best_effort
+from mcp import ClientSession
 from models import DemoCheckout
 
 
@@ -48,6 +52,46 @@ def idempotency_key_for_cart(cart_id: str) -> str:
     how long the signed cart_id itself is (mandates allow up to 128 chars).
     """
     return hashlib.sha256(cart_id.encode("utf-8")).hexdigest()
+
+
+async def _call_and_log(
+    session: ClientSession, tool: str, arguments: dict, *, transaction_id: str, cart_id: str
+) -> dict:
+    """Every MCP tool call gets its own RAZORPAY_CALL ledger row (CLAUDE.md:
+    "every Razorpay call writes exactly one row" -- taken literally, since
+    a checkout makes 3-4 separate calls). Best-effort: by the time we're
+    calling Razorpay at all, the reservation already exists (executor/gate.py
+    logs SPEND_RESERVED first), so we're past the fail-closed boundary.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        result = await call_tool(session, tool, arguments)
+    except Exception as exc:
+        append_event_best_effort(
+            event_type=LedgerEvent.RAZORPAY_CALL,
+            now=now,
+            transaction_id=transaction_id,
+            cart_id=cart_id,
+            razorpay_tool=tool,
+            razorpay_outcome="error",
+            error_detail=type(exc).__name__,
+            explanation=f"{tool} failed",
+        )
+        raise
+    ref_id = result.get("id") or result.get("payment_link_id") or result.get("payment_id")
+    append_event_best_effort(
+        event_type=LedgerEvent.RAZORPAY_CALL,
+        now=now,
+        transaction_id=transaction_id,
+        cart_id=cart_id,
+        razorpay_tool=tool,
+        razorpay_outcome="ok",
+        order_id=ref_id if tool == "create_order" else None,
+        payment_link_id=ref_id if tool in ("create_payment_link", "fetch_payment_link") else None,
+        payment_id=ref_id if tool == "fetch_payment" else None,
+        explanation=f"{tool} succeeded",
+    )
+    return result
 
 
 def _to_response(row: DemoCheckout, replayed: bool) -> dict:
@@ -70,6 +114,7 @@ async def run_demo_checkout(
     cart_id: str,
     amount_paise: int,
     description: str | None,
+    transaction_id: str,
 ) -> dict:
     idempotency_key = idempotency_key_for_cart(cart_id)
 
@@ -101,13 +146,15 @@ async def run_demo_checkout(
 
     try:
         async with razorpay_session() as session:
-            order = await call_tool(
+            order = await _call_and_log(
                 session,
                 "create_order",
                 {"amount": amount_paise, "currency": "INR", "receipt": reference_id},
+                transaction_id=transaction_id,
+                cart_id=cart_id,
             )
 
-            link = await call_tool(
+            link = await _call_and_log(
                 session,
                 "create_payment_link",
                 {
@@ -117,9 +164,17 @@ async def run_demo_checkout(
                     "description": description or "Pramaan demo checkout",
                     "notes": {"order_id": order["id"], "cart_id": cart_id},
                 },
+                transaction_id=transaction_id,
+                cart_id=cart_id,
             )
 
-            link_status = await call_tool(session, "fetch_payment_link", {"payment_link_id": link["id"]})
+            link_status = await _call_and_log(
+                session,
+                "fetch_payment_link",
+                {"payment_link_id": link["id"]},
+                transaction_id=transaction_id,
+                cart_id=cart_id,
+            )
 
             payment_id = None
             payment_status = None
@@ -127,7 +182,13 @@ async def run_demo_checkout(
             if payments:
                 payment_id = payments[0].get("payment_id") or payments[0].get("id")
             if payment_id:
-                payment = await call_tool(session, "fetch_payment", {"payment_id": payment_id})
+                payment = await _call_and_log(
+                    session,
+                    "fetch_payment",
+                    {"payment_id": payment_id},
+                    transaction_id=transaction_id,
+                    cart_id=cart_id,
+                )
                 payment_status = payment.get("status")
     except* Exception as eg:
         # `except*` (not a plain `except RazorpayToolError`) because the mcp

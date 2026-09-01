@@ -43,7 +43,7 @@ def _make_pair(user_id: str, user_signing_key, merchant_signing_key, intent_over
     return intent, cart
 
 
-async def _fake_run_demo_checkout(db, cart_id, amount_paise, description):
+async def _fake_run_demo_checkout(db, cart_id, amount_paise, description, transaction_id):
     """Stands in for executor.checkout.run_demo_checkout -- no live Razorpay
     calls in unit tests. Mirrors the real function's DemoCheckout bookkeeping
     closely enough for the gate's idempotency-cache-hit path to still work.

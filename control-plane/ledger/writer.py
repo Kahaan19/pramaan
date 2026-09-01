@@ -33,6 +33,7 @@ fully commits or leaves no trace at all (own session, single INSERT+COMMIT),
 so a failed attempt never consumes a seq value.
 """
 
+import sys
 from datetime import datetime
 
 from sqlalchemy import select, text
@@ -168,6 +169,20 @@ def append_event(
             session.close()
 
     raise RuntimeError(f"ledger append failed after {_MAX_RETRIES} retries") from last_error
+
+
+def append_event_best_effort(**kwargs) -> None:
+    """For POST-money-move events only (see executor/gate.py and
+    executor/checkout.py's write-policy docstrings): append_event() already
+    retries internally; if it STILL fails here, log loudly to stderr and
+    swallow the error rather than failing a request whose money-moving side
+    effect has already happened. A shared function (not duplicated in both
+    callers) so the fail-open policy lives in exactly one place.
+    """
+    try:
+        append_event(**kwargs)
+    except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
+        print(f"[ledger] FAILED to append {kwargs.get('event_type')}: {exc}", file=sys.stderr, flush=True)
 
 
 def _razorpay_refs_json(payload: LedgerPayload) -> str | None:
