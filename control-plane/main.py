@@ -15,7 +15,7 @@ from ledger import models as ledger_models  # noqa: F401 - registers ledger_rows
 from ledger.events import LedgerEvent
 from ledger.writer import append_event_best_effort
 from mandates import nonce as mandate_nonce  # noqa: F401 - registers mandate_nonces table
-from routers import demo
+from routers import demo, ledger as ledger_router
 
 
 @asynccontextmanager
@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Pramaan Control Plane", lifespan=lifespan)
 app.include_router(demo.router)
+app.include_router(ledger_router.router)
 
 
 @app.exception_handler(RequestValidationError)
