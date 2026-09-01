@@ -37,8 +37,9 @@ cd pramaan
    (`merchant_demo_01`) Ed25519 keypairs to `secrets/` (gitignored; the control plane loads
    only the public halves).
 5. `uvicorn main:app --app-dir control-plane --reload`
-6. `pytest` — 117 tests: mandate signatures/scope/replay, policy rules/purity, and the
-   gated checkout flow (executor mocked, no live Razorpay calls in tests).
+6. `pytest` — 167 tests: mandate signatures/scope/replay, policy rules/purity, the gated
+   checkout flow (executor mocked, no live Razorpay calls in tests), and the hash-chained
+   ledger (payload determinism, chain-tamper detection, concurrent-append safety).
 
 **`POST /demo/checkout` is now the full gate**: mandate verification → policy evaluation →
 executor. The body is `{"intent": <signed Intent Mandate>, "cart": <signed Cart Mandate>}` —
@@ -69,6 +70,52 @@ valid intent can pick its own category. Deriving category from what's actually i
 (a merchant/SKU registry) is future work; the rule still fails closed (an absent or
 disallowed category is denied) because an omitted field must never be a way to skip a
 control.
+
+### Audit ledger (Phase 3)
+
+Every mandate check, policy verdict, human-queue entry, individual Razorpay MCP call, and
+execution outcome writes exactly one row to a hash-chained, append-only Postgres table
+(`ledger_rows`). `GET /ledger/{transaction_id_or_cart_id}/explain` reconstructs the full
+story in plain English. Live example (a real `$1.299` ALLOW, values shortened):
+
+```json
+{
+  "headline": "ALLOWED. Payment link created ({\"order_id\":\"order_TWs...\",\"payment_link_id\":\"plink_TWs...\"}).",
+  "narrative": [
+    "[seq 5] Checkout request received for cart cart_allow_2edca4d8.",
+    "[seq 6] Signed intent and cart mandates verified: cart is within the intent's scope",
+    "[seq 7] Cart nonce consumed -- this exact cart can never be replayed again.",
+    "[seq 8] ALLOWED: no rule fired; transaction is within all limits",
+    "[seq 9] Budget reserved before execution: 50000 paise reserved against the hourly velocity budget",
+    "[seq 10] Razorpay call: create_order succeeded",
+    "[seq 11] Razorpay call: create_payment_link succeeded",
+    "[seq 12] Razorpay call: fetch_payment_link succeeded",
+    "[seq 13] Execution confirmed: order order_TWs... / payment link plink_TWs... created"
+  ],
+  "integrity_status": "OK",
+  "integrity_findings": []
+}
+```
+
+`GET /ledger/verify` walks the whole chain and reports the first tampered row by exact
+`seq`; `GET /ledger/head` returns the current `(seq, row_hash)` so it can be checkpointed
+outside the database. Verified live: a raw `UPDATE ledger_rows ...` is rejected by a
+Postgres trigger; disabling that trigger and mutating a row's payload directly is still
+caught by `verify_chain()` recomputing hashes from the stored bytes — the trigger stops
+casual mistakes, the hash chain is the actual tamper detector.
+
+**Honest limitations, not hidden:**
+- The app connects to Postgres as the `postgres` superuser, which bypasses every grant and
+  can drop the trigger or the table outright. The append-only trigger guards against this
+  codebase's own bugs, not a DBA with credentials.
+- A hash chain cannot detect its own **tail** being truncated (`DELETE ... WHERE seq > N`
+  leaves a chain that still verifies). Mitigated by cross-checking against
+  `spend_reservations`/`demo_checkouts` — tables written on a separate transaction path — so
+  an operational record with zero matching ledger rows raises a specific
+  `MISSING_AUDIT_FOR_KNOWN_TRANSACTION` finding instead of silently passing.
+- Both `/ledger` endpoints are unauthenticated in this demo.
+- `agent_id` from CLAUDE.md's documented ledger-row shape doesn't exist yet — there's no
+  agent identity until the Phase 5 buyer agent — so rows use `user_id`/`merchant_id` instead.
 
 ## Demo
 _(Filled during Phase 5: the three blocked attacks + one successful purchase.)_
