@@ -97,6 +97,15 @@ def reserve_spend(
 
 
 def mark_committed(db: Session, reservation: SpendReservation, payment_link_id: str) -> None:
+    """Raises ValueError on a falsy payment_link_id rather than silently
+    writing a COMMITTED row with no proof anything was actually created --
+    a reservation claiming success with no payment_link_id is worse than one
+    correctly marked FAILED.
+    """
+    if not payment_link_id:
+        raise ValueError(
+            f"mark_committed requires a non-empty payment_link_id (cart_id={reservation.cart_id!r})"
+        )
     reservation.status = "COMMITTED"
     reservation.payment_link_id = payment_link_id
     reservation.settled_at = datetime.now(timezone.utc)
