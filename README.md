@@ -45,8 +45,8 @@ cd pramaan
 executor. The body is `{"intent": <signed Intent Mandate>, "cart": <signed Cart Mandate>}` —
 no raw `amount_paise` field exists; the charged amount comes only from the signed
 `cart.total_paise`. Responses: `200` (`ALLOW`, with real Razorpay refs), `202` (`STEP_UP`,
-nothing executed yet — Phase 4 adds the human approval queue), `403` (`DENY`, or a mandate
-failure), `409` (a replayed cart nonce), `422` (malformed request).
+queued for human approval — see Dashboard below), `403` (`DENY`, or a mandate failure),
+`409` (a replayed cart nonce), `422` (malformed request).
 
 Live-verified against Razorpay test mode: a ₹1,299 cart returns `202 STEP_UP`
 (`step_up_amount_threshold`) with zero Razorpay calls; a sub-₹1,000 cart returns `200 ALLOW`
@@ -116,6 +116,39 @@ casual mistakes, the hash chain is the actual tamper detector.
 - Both `/ledger` endpoints are unauthenticated in this demo.
 - `agent_id` from CLAUDE.md's documented ledger-row shape doesn't exist yet — there's no
   agent identity until the Phase 5 buyer agent — so rows use `user_id`/`merchant_id` instead.
+
+### Dashboard (Phase 4)
+
+A Next.js HITL console in `dashboard/`. Panels: a live transaction feed (verdict + rule
+fired), a STEP-UP approval queue showing the reviewer the real mandate details (buyer,
+merchant, items, intent cap, expiry — not a rubber stamp), an Explain view (calls the
+Phase 3 `/ledger/{key}/explain` endpoint), and a red "Rogue agent blocked" panel filtering
+DENY events specifically. Clicking any transaction row drives the Explain view.
+
+Run it alongside the control plane:
+```
+cd dashboard
+cp .env.example .env.local        # NEXT_PUBLIC_API_BASE_URL, defaults to localhost:8000
+npm install
+npm run dev                        # http://localhost:3000
+```
+
+**Approval is not a shortcut.** Clicking Approve calls `POST /demo/step-up/{cart_id}/approve`,
+which re-verifies the mandate from its stored signed snapshot (never a resubmitted body) with
+a fresh clock, re-evaluates policy with fresh velocity/pending-approval state, and — only if
+that re-check still clears — executes through the *exact same* code path an automatic `ALLOW`
+uses. The re-evaluation is a veto only: it can downgrade a stale `STEP_UP` to `DENY` (e.g. the
+intent expired while queued) but a human's approval is what authorizes execution, never a
+re-evaluation to `ALLOW` skipping the human. Both veto paths are tested directly.
+
+New backend endpoints this phase added: `GET /demo/step-up` (queue), `GET
+/demo/step-up/{cart_id}`, `POST .../approve`, `POST .../deny`, and `GET /ledger/recent` (one
+summary per transaction, reusing `explain()`'s own headline logic so the dashboard feed and
+the Explain view can never disagree about an outcome).
+
+**Honest limitations:** `actor` on approve/deny is a plain, unauthenticated string naming who
+clicked the button — there is no operator identity or auth system in this demo. Both `/ledger`
+and `/demo/step-up` endpoints are open to anyone who can reach the API.
 
 ## Demo
 _(Filled during Phase 5: the three blocked attacks + one successful purchase.)_

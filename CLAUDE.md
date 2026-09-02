@@ -74,7 +74,7 @@ docs/                   diagrams, threat-model → control mapping, mandate exam
 - [x] Phase 1 — Mandates: Ed25519 sign/verify + scope check
 - [x] Phase 2 — Policy engine: deterministic rules + verdicts + tests
 - [x] Phase 3 — Ledger: hash chain + explain() API
-- [ ] Phase 4 — HITL + dashboard
+- [x] Phase 4 — HITL + dashboard
 - [ ] Phase 5 — Rogue-agent demo + metrics batch
 
 ## Scope discipline (what NOT to build)
