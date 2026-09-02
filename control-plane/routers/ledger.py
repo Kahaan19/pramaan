@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db import get_db
@@ -7,6 +8,50 @@ from ledger.models import LedgerRow
 from ledger.verify import verify_chain
 
 router = APIRouter(prefix="/ledger", tags=["ledger"])
+
+
+@router.get("/recent")
+def recent(limit: int = 25, db: Session = Depends(get_db)) -> dict:
+    """One summary per distinct transaction_id, most recently active first.
+    Reuses explain()'s own headline/decision logic per transaction (rather
+    than recomputing it here) so the feed and the Explain view can never
+    disagree about what a transaction's outcome was -- including correctly
+    downgrading a claim to "unverified" if that transaction's rows were
+    tampered with (see ledger/explain.py's headline-filtering fix).
+    """
+    latest_seq_per_tx = (
+        select(LedgerRow.transaction_id, func.max(LedgerRow.seq).label("max_seq"))
+        .group_by(LedgerRow.transaction_id)
+        .subquery()
+    )
+    tx_ids = (
+        db.execute(
+            select(latest_seq_per_tx.c.transaction_id)
+            .order_by(latest_seq_per_tx.c.max_seq.desc())
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+
+    transactions = []
+    for tx_id in tx_ids:
+        result = explain_transaction(db, tx_id)
+        first = result.entries[0] if result.entries else None
+        decision = next((e.decision for e in result.entries if e.decision), None)
+        rule_fired = next((e.rule_fired for e in result.entries if e.rule_fired), None)
+        transactions.append(
+            {
+                "transaction_id": tx_id,
+                "cart_id": first.cart_id if first else None,
+                "ts": first.ts if first else None,
+                "headline": result.headline,
+                "decision": decision,
+                "rule_fired": rule_fired,
+                "integrity_status": result.integrity_status,
+            }
+        )
+    return {"transactions": transactions}
 
 
 @router.get("/{key}/explain")

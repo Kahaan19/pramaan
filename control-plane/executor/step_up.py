@@ -16,7 +16,7 @@ small approved amount applied to a much larger cart at approval time.
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, String, Text, func, select
+from sqlalchemy import BigInteger, DateTime, String, Text, func, select, update
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from db import Base
@@ -34,7 +34,7 @@ class StepUpRequest(Base):
     amount_paise: Mapped[int] = mapped_column(BigInteger)
     rule_fired: Mapped[str] = mapped_column(String(64))
     reason: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(16), default="PENDING")  # PENDING|APPROVED|REJECTED|EXPIRED
+    status: Mapped[str] = mapped_column(String(16), default="PENDING")  # PENDING|PROCESSING|APPROVED|REJECTED|EXPIRED
     intent_json: Mapped[str] = mapped_column(Text)
     cart_json: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
@@ -75,3 +75,55 @@ def create_step_up_request(
     db.commit()
     db.refresh(row)
     return row
+
+
+def list_pending(db: Session, limit: int = 50) -> list[StepUpRequest]:
+    return (
+        db.execute(
+            select(StepUpRequest)
+            .where(StepUpRequest.status == "PENDING")
+            .order_by(StepUpRequest.created_at.asc())
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def get_by_cart_id(db: Session, cart_id: str) -> StepUpRequest | None:
+    return db.execute(select(StepUpRequest).where(StepUpRequest.cart_id == cart_id)).scalar_one_or_none()
+
+
+def claim_for_resolution(db: Session, cart_id: str) -> StepUpRequest | None:
+    """Atomically transitions PENDING -> PROCESSING. Returns the claimed row,
+    or None if it was already resolved (a concurrent double-click on
+    Approve/Deny, or a stale dashboard). This is the guard against two
+    concurrent decisions both proceeding on the same step-up request --
+    the WHERE status='PENDING' makes the transition a single atomic
+    statement rather than a check-then-write race.
+
+    PROCESSING is deliberately not a terminal state visible in the normal
+    PENDING|APPROVED|REJECTED|EXPIRED lifecycle documented on the model: the
+    caller must follow up with resolve_approved()/resolve_rejected() once it
+    knows the real outcome (an approval can still be vetoed by re-evaluated
+    policy after being claimed -- see executor/gate.py::run_step_up_approval).
+    """
+    result = db.execute(
+        update(StepUpRequest)
+        .where(StepUpRequest.cart_id == cart_id, StepUpRequest.status == "PENDING")
+        .values(status="PROCESSING")
+    )
+    db.commit()
+    if result.rowcount == 0:
+        return None
+    return get_by_cart_id(db, cart_id)
+
+
+def resolve_approved(db: Session, row: StepUpRequest) -> None:
+    row.status = "APPROVED"
+    db.commit()
+
+
+def resolve_rejected(db: Session, row: StepUpRequest) -> None:
+    row.status = "REJECTED"
+    db.commit()

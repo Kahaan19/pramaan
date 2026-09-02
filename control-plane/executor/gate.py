@@ -55,7 +55,14 @@ from sqlalchemy.orm import Session
 from executor.checkout import idempotency_key_for_cart, run_demo_checkout
 from executor.razorpay_mcp import reraise_unwrapped
 from executor.spend import load_recent_spend, mark_committed, mark_failed, reserve_spend
-from executor.step_up import count_pending, create_step_up_request
+from executor.step_up import (
+    StepUpRequest,
+    claim_for_resolution,
+    count_pending,
+    create_step_up_request,
+    resolve_approved,
+    resolve_rejected,
+)
 from ledger.events import LedgerEvent
 from ledger.writer import append_event, append_event_best_effort
 from mandates.canonical import signing_bytes
@@ -330,8 +337,21 @@ async def run_gate(
         )
         return StepUpResult(verdict=verdict, step_up_request_id=step_up_row.id)
 
-    # ALLOW: reserve BEFORE calling Razorpay. This commit releases the lock;
-    # the Razorpay call below holds no lock at all.
+    return await _execute_allowed(db, intent, cart, now, transaction_id, verdict)
+
+
+async def _execute_allowed(
+    db: Session, intent: IntentMandate, cart: CartMandate, now: datetime, transaction_id: str, verdict: Verdict
+) -> AllowResult:
+    """The ALLOW-path execution: reserve -> call the executor -> mark
+    committed/failed. Shared by run_gate's own ALLOW branch and
+    run_step_up_approval() below -- an approved STEP_UP must execute through
+    EXACTLY this path, not a shortcut, so a human approval carries the same
+    guarantees (reservation before the Razorpay call, an audit row for every
+    step) as an automatic ALLOW.
+    """
+    # Reserve BEFORE calling Razorpay. This commit releases the caller's
+    # per-user lock; the Razorpay call below holds no lock at all.
     reservation = reserve_spend(
         db,
         cart_id=cart.cart_id,
@@ -407,6 +427,165 @@ async def run_gate(
 
     mark_committed(db, reservation, checkout["payment_link_id"])
     return AllowResult(verdict=verdict, checkout=checkout)
+
+
+@dataclass(frozen=True)
+class StepUpNotFoundOrResolvedResult:
+    """cart_id doesn't exist as a step-up request, or it was already
+    resolved -- including a concurrent double-click on Approve/Deny that
+    this call lost the race to (see claim_for_resolution's atomic
+    PENDING -> PROCESSING transition).
+    """
+
+
+async def run_step_up_approval(
+    db: Session, cart_id: str, keyring: Keyring | None = None, actor: str | None = None
+) -> GateResult | StepUpNotFoundOrResolvedResult:
+    """A human approving a STEP_UP. Re-verifies the mandate and re-evaluates
+    policy from the STORED signed snapshot -- never a client-supplied body,
+    which is exactly what step_up.py's create_step_up_request docstring
+    warns an approval endpoint must avoid -- with a fresh `now`. An intent
+    that expired while queued, or a user who hit a velocity/pending-approval
+    limit via OTHER transactions since queuing, is caught here rather than
+    blindly honoring a stale decision.
+
+    The re-evaluation is a VETO ONLY: it can downgrade STEP_UP to DENY, but
+    a human's approval is what authorizes execution -- re-evaluating to
+    ALLOW does not retroactively mean the human didn't need to look at it.
+
+    Execution runs through _execute_allowed() -- the EXACT function run_gate
+    uses for its own automatic ALLOW path. No shortcut.
+    """
+    claimed = claim_for_resolution(db, cart_id)
+    if claimed is None:
+        return StepUpNotFoundOrResolvedResult()
+
+    intent = IntentMandate.model_validate_json(claimed.intent_json)
+    cart = CartMandate.model_validate_json(claimed.cart_json)
+
+    now = datetime.now(timezone.utc)
+    transaction_id = str(uuid.uuid4())
+    approver = actor or "operator"
+
+    _acquire_user_lock(db, intent.user_id)
+
+    active_keyring = keyring if keyring is not None else get_keyring()
+    try:
+        verified = verify_mandate_chain(intent, cart, active_keyring, now)
+    except MandateError as exc:
+        resolve_rejected(db, claimed)  # commits, releasing the lock
+        _log(
+            event_type=LedgerEvent.MANDATE_REJECTED,
+            now=now,
+            transaction_id=transaction_id,
+            cart_id=cart.cart_id,
+            intent_id=intent.intent_id,
+            user_id=intent.user_id,
+            merchant_id=cart.merchant_id,
+            actor=approver,
+            mandate_error_code=exc.code.value,
+            mandate_error_message=exc.message,
+            explanation=f"approval vetoed at re-verification: ({exc.code.value}) {exc.message}",
+        )
+        _log(
+            event_type=LedgerEvent.STEP_UP_REJECTED,
+            now=now,
+            transaction_id=transaction_id,
+            cart_id=cart.cart_id,
+            intent_id=intent.intent_id,
+            actor=approver,
+            explanation="mandate no longer verifies (likely expired while queued)",
+        )
+        raise
+
+    rules_config, rules_sha256 = get_rules_config()
+    recent_spend = load_recent_spend(
+        db, verified.intent.user_id, now, rules_config.limits.velocity.window_seconds
+    )
+    # claim_for_resolution already moved this row PENDING -> PROCESSING, so
+    # count_pending() no longer counts it against itself here.
+    pending_step_up_count = count_pending(db, verified.intent.user_id)
+
+    ctx = build_context(
+        verified=verified,
+        recent_spend=recent_spend,
+        pending_step_up_count=pending_step_up_count,
+        rules=rules_config,
+        rules_sha256=rules_sha256,
+    )
+    fresh_verdict = evaluate(ctx)
+
+    _log(
+        event_type=LedgerEvent.POLICY_VERDICT,
+        now=now,
+        transaction_id=transaction_id,
+        cart_id=cart.cart_id,
+        intent_id=intent.intent_id,
+        user_id=intent.user_id,
+        merchant_id=cart.merchant_id,
+        actor="system",
+        amount_paise=cart.total_paise,
+        decision=fresh_verdict.decision.value,
+        rule_fired=fresh_verdict.rule_fired,
+        reason=fresh_verdict.reason,
+        all_violations=tuple(f"{v.rule_fired}: {v.reason}" for v in fresh_verdict.all_violations),
+        rules_version=fresh_verdict.rules_version,
+        rules_sha256=fresh_verdict.rules_sha256,
+        explanation=f"re-evaluated at approval time: {fresh_verdict.reason}",
+    )
+
+    if fresh_verdict.decision is Decision.DENY:
+        resolve_rejected(db, claimed)  # commits, releasing the lock
+        _log(
+            event_type=LedgerEvent.STEP_UP_REJECTED,
+            now=now,
+            transaction_id=transaction_id,
+            cart_id=cart.cart_id,
+            intent_id=intent.intent_id,
+            actor=approver,
+            rule_fired=fresh_verdict.rule_fired,
+            explanation=(
+                f"approval vetoed by policy re-evaluation (rule {fresh_verdict.rule_fired}): "
+                f"{fresh_verdict.reason}"
+            ),
+        )
+        return DenyResult(verdict=fresh_verdict)
+
+    resolve_approved(db, claimed)
+    _log(
+        event_type=LedgerEvent.STEP_UP_APPROVED,
+        now=now,
+        transaction_id=transaction_id,
+        cart_id=cart.cart_id,
+        intent_id=intent.intent_id,
+        actor=approver,
+        explanation=f"approved by {approver}",
+    )
+
+    return await _execute_allowed(db, intent, cart, now, transaction_id, fresh_verdict)
+
+
+async def run_step_up_denial(
+    db: Session, cart_id: str, actor: str | None = None
+) -> StepUpRequest | StepUpNotFoundOrResolvedResult:
+    """A human denying a STEP_UP. No re-verification needed -- denial never
+    moves money, so there is nothing to protect against a stale mandate for.
+    """
+    claimed = claim_for_resolution(db, cart_id)
+    if claimed is None:
+        return StepUpNotFoundOrResolvedResult()
+
+    resolve_rejected(db, claimed)
+    _log(
+        event_type=LedgerEvent.STEP_UP_REJECTED,
+        now=datetime.now(timezone.utc),
+        transaction_id=str(uuid.uuid4()),
+        cart_id=claimed.cart_id,
+        intent_id=claimed.intent_id,
+        actor=actor or "operator",
+        explanation=f"denied by {actor or 'operator'}",
+    )
+    return claimed
 
 
 def _checkout_response(row: DemoCheckout, replayed: bool) -> dict:

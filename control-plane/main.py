@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import models  # noqa: F401 - registers tables on Base.metadata
@@ -25,6 +26,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Pramaan Control Plane", lifespan=lifespan)
+
+# The Next.js dashboard (dashboard/) runs on a different origin in dev
+# (localhost:3000 -> localhost:8000). Wide open (any localhost dev port, no
+# credentials) is fine for a local demo; this is not a production CORS
+# policy and isn't meant to be one.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"http://localhost:\d+",
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(demo.router)
 app.include_router(ledger_router.router)
 
