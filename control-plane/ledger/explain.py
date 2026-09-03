@@ -18,6 +18,15 @@ from sqlalchemy.orm import Session
 from ledger.models import LedgerRow
 from ledger.verify import ChainVerification, verify_chain
 
+# A mandate rejection (bad signature, expired, replay) or a STEP_UP veto at
+# approval time -- none of these produce a policy DENY verdict (they're
+# caught before, or instead of, policy running), but they are just as
+# terminal and just as much "no money moved". Module-level so routers/
+# ledger.py's /recent endpoint can classify the SAME way for its decision
+# badge without a second, possibly-drifting definition of "counts as
+# blocked".
+REJECTION_EVENT_TYPES = {"MANDATE_REJECTED", "NONCE_REPLAY_REJECTED", "STEP_UP_REJECTED"}
+
 
 @dataclass(frozen=True)
 class LedgerEntry:
@@ -141,15 +150,24 @@ def _headline(verified_entries: tuple[LedgerEntry, ...], chain_broken: bool) -> 
     if not verified_entries:
         return "CHAIN INTEGRITY BROKEN. No verified rows remain for this transaction -- no conclusion can be drawn."
 
+    # Order matters: terminal outcomes are checked BEFORE "still pending".
+    # explain(cart_id) merges rows from every attempt against that cart --
+    # including a STEP_UP that was later approved/rejected under a
+    # DIFFERENT transaction_id (see executor/gate.py::run_step_up_approval,
+    # which mints its own transaction_id for the approval action). Without
+    # this ordering, a resolved step-up would still report "PENDING HUMAN
+    # APPROVAL" from its stale STEP_UP_QUEUED row.
     if any(e.decision == "DENY" for e in verified_entries):
         headline = "BLOCKED. No money moved."
     elif any(e.event_type == "EXECUTION_COMMITTED" for e in verified_entries):
         refs = next((e.razorpay_refs for e in reversed(verified_entries) if e.razorpay_refs), None)
         headline = f"ALLOWED. Payment link created ({refs})." if refs else "ALLOWED. Payment link created."
-    elif any(e.event_type == "STEP_UP_QUEUED" for e in verified_entries):
-        headline = "PENDING HUMAN APPROVAL. No money has moved yet."
+    elif any(e.event_type in REJECTION_EVENT_TYPES for e in verified_entries):
+        headline = "BLOCKED. No money moved."
     elif any(e.event_type == "EXECUTION_FAILED" for e in verified_entries):
         headline = "EXECUTION FAILED. The payment attempt did not complete."
+    elif any(e.event_type == "STEP_UP_QUEUED" for e in verified_entries):
+        headline = "PENDING HUMAN APPROVAL. No money has moved yet."
     elif any(e.event_type == "IDEMPOTENT_REPLAY" for e in verified_entries):
         headline = "REPLAY. This is a duplicate of an earlier request; see its cached outcome below."
     else:

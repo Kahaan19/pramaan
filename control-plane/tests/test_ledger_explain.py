@@ -124,6 +124,83 @@ def test_explain_reports_broken_chain_first_and_loud(clean_ledger):
     assert all("UNVERIFIED" in line for line in result.narrative)  # every row is at/after the bad seq
 
 
+def test_headline_for_bare_mandate_rejection_is_blocked_not_unclear(clean_ledger):
+    """A mandate rejection (bad signature, expired, replay) never produces a
+    POLICY_VERDICT row -- verify_mandate_chain fails before policy ever
+    runs. A transaction consisting SOLELY of a MANDATE_REJECTED row must
+    still report a clear BLOCKED headline, not fall through to the generic
+    'OUTCOME UNCLEAR' bucket.
+    """
+    txid = str(uuid.uuid4())
+    cart_id = "cart_" + uuid.uuid4().hex
+    _append(
+        event_type=LedgerEvent.REQUEST_RECEIVED, transaction_id=txid, cart_id=cart_id, explanation="received"
+    )
+    _append(
+        event_type=LedgerEvent.MANDATE_REJECTED,
+        transaction_id=txid,
+        cart_id=cart_id,
+        mandate_error_code="expired",
+        explanation="(expired) intent expired",
+    )
+
+    result = explain(clean_ledger, txid)
+    assert "BLOCKED" in result.headline
+    assert "UNCLEAR" not in result.headline
+
+
+def test_headline_for_approval_veto_across_two_transaction_ids_is_blocked(clean_ledger):
+    """Reproduces the exact live scenario this test pins: a STEP_UP queued
+    under one transaction_id, later vetoed at approval time under a
+    DIFFERENT transaction_id (executor/gate.py::run_step_up_approval mints
+    its own transaction_id for the approval action). explain(cart_id) merges
+    both. Before the fix, the still-present STEP_UP_QUEUED row from the
+    FIRST transaction made this report "PENDING HUMAN APPROVAL" (or, if
+    checked after the DENY branch some other way, "OUTCOME UNCLEAR") even
+    though the cart was, in fact, definitively rejected.
+    """
+    cart_id = "cart_" + uuid.uuid4().hex
+    original_tx = str(uuid.uuid4())
+    approval_tx = str(uuid.uuid4())
+
+    _append(event_type=LedgerEvent.REQUEST_RECEIVED, transaction_id=original_tx, cart_id=cart_id, explanation="received")
+    _append(
+        event_type=LedgerEvent.POLICY_VERDICT,
+        transaction_id=original_tx,
+        cart_id=cart_id,
+        decision="STEP_UP",
+        rule_fired="step_up_amount_threshold",
+        explanation="amount at/above threshold",
+    )
+    _append(
+        event_type=LedgerEvent.STEP_UP_QUEUED,
+        transaction_id=original_tx,
+        cart_id=cart_id,
+        decision="STEP_UP",
+        rule_fired="step_up_amount_threshold",
+        explanation="queued",
+    )
+    _append(
+        event_type=LedgerEvent.MANDATE_REJECTED,
+        transaction_id=approval_tx,
+        cart_id=cart_id,
+        mandate_error_code="expired",
+        explanation="approval vetoed at re-verification: (expired) intent expired while queued",
+    )
+    _append(
+        event_type=LedgerEvent.STEP_UP_REJECTED,
+        transaction_id=approval_tx,
+        cart_id=cart_id,
+        explanation="mandate no longer verifies (likely expired while queued)",
+    )
+
+    result = explain(clean_ledger, cart_id)
+    assert "BLOCKED" in result.headline
+    assert "PENDING" not in result.headline
+    assert "UNCLEAR" not in result.headline
+    assert len(result.entries) == 5  # both transactions' rows, merged
+
+
 def test_headline_does_not_confidently_restate_a_tampered_decisive_row(clean_ledger):
     """Regression: tampering with the POLICY_VERDICT row specifically (not
     the first row in the transaction) must not leave the headline still

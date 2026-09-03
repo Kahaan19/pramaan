@@ -3,7 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db import get_db
-from ledger.explain import explain as explain_transaction
+from ledger.explain import REJECTION_EVENT_TYPES, explain as explain_transaction
 from ledger.models import LedgerRow
 from ledger.verify import verify_chain
 
@@ -40,6 +40,16 @@ def recent(limit: int = 25, db: Session = Depends(get_db)) -> dict:
         first = result.entries[0] if result.entries else None
         decision = next((e.decision for e in result.entries if e.decision), None)
         rule_fired = next((e.rule_fired for e in result.entries if e.rule_fired), None)
+        # No policy verdict exists for a mandate rejection or a STEP_UP veto
+        # (verify_mandate_chain fails before/instead of policy running -- see
+        # executor/gate.py), so `decision` stays None from the loop above.
+        # For the dashboard's badge, classify it the same as a policy DENY:
+        # a display classification, not a claim that a Decision enum value
+        # was ever produced. Matches _headline()'s own precedence exactly
+        # (ledger/explain.py::REJECTION_EVENT_TYPES) so the badge and the
+        # headline can never disagree about whether this was "blocked".
+        if decision is None and any(e.event_type in REJECTION_EVENT_TYPES for e in result.entries):
+            decision = "DENY"
         transactions.append(
             {
                 "transaction_id": tx_id,
