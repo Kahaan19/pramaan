@@ -1,0 +1,156 @@
+{
+  "generated_at": "2026-09-04T10:39:24.479396+00:00",
+  "rules_sha256": "a79b8b40c1666f79f31c678138951d311f71803563587710110474fd94ec77fe",
+  "chain": {
+    "ok": true,
+    "row_count": 174,
+    "head_seq": 173,
+    "head_hash": "e7edac54cd65542e1af4904064ad31aa2b16ecf95d292169956f3f9e13c832f1",
+    "findings": []
+  },
+  "metrics": {
+    "total_attempts": 40,
+    "legitimate_count": 19,
+    "malicious_count": 16,
+    "indistinguishable_count": 5,
+    "executed_count": 15,
+    "blocked_count": 18,
+    "escalated_count": 7,
+    "attack_block_rate": 1.0,
+    "false_negatives": 0,
+    "false_negative_ids": [],
+    "false_positives": 2,
+    "false_positive_ids": [
+      "L5_busy_honest_velocity_15",
+      "L6_highvalue_pending_cap_19"
+    ],
+    "false_positive_rate": 0.10526315789473684,
+    "escalation_rate": 0.3684210526315789,
+    "money_moved_paise": 579500,
+    "money_blocked_paise": 2894800,
+    "audit_coverage": 1.0,
+    "control_drift": 0,
+    "control_drift_ids": []
+  },
+  "groups": [
+    {
+      "group": "L1_routine_small",
+      "label": "LEGITIMATE",
+      "count": 4,
+      "matched_expected": 4
+    },
+    {
+      "group": "L2_highvalue_stepup",
+      "label": "LEGITIMATE",
+      "count": 3,
+      "matched_expected": 3
+    },
+    {
+      "group": "L3_delegated",
+      "label": "LEGITIMATE",
+      "count": 1,
+      "matched_expected": 1
+    },
+    {
+      "group": "L4_legit_retry",
+      "label": "LEGITIMATE",
+      "count": 1,
+      "matched_expected": 1
+    },
+    {
+      "group": "L5_busy_honest_velocity",
+      "label": "LEGITIMATE",
+      "count": 6,
+      "matched_expected": 6
+    },
+    {
+      "group": "L6_highvalue_pending_cap",
+      "label": "LEGITIMATE",
+      "count": 4,
+      "matched_expected": 4
+    },
+    {
+      "group": "M10_expired_intent",
+      "label": "MALICIOUS",
+      "count": 1,
+      "matched_expected": 1
+    },
+    {
+      "group": "M11_disallowed_category",
+      "label": "MALICIOUS",
+      "count": 1,
+      "matched_expected": 1
+    },
+    {
+      "group": "M12_runaway_loop_caught",
+      "label": "MALICIOUS",
+      "count": 2,
+      "matched_expected": 2
+    },
+    {
+      "group": "M12_runaway_loop_prefix",
+      "label": "INDISTINGUISHABLE",
+      "count": 5,
+      "matched_expected": 5
+    },
+    {
+      "group": "M1_over_mandate_spend",
+      "label": "MALICIOUS",
+      "count": 2,
+      "matched_expected": 2
+    },
+    {
+      "group": "M2_over_platform_cap",
+      "label": "MALICIOUS",
+      "count": 2,
+      "matched_expected": 2
+    },
+    {
+      "group": "M3_unknown_payee",
+      "label": "MALICIOUS",
+      "count": 1,
+      "matched_expected": 1
+    },
+    {
+      "group": "M4_off_intent_allowlist",
+      "label": "MALICIOUS",
+      "count": 2,
+      "matched_expected": 2
+    },
+    {
+      "group": "M5_off_platform_allowlist",
+      "label": "MALICIOUS",
+      "count": 1,
+      "matched_expected": 1
+    },
+    {
+      "group": "M6_tampered_cart_price",
+      "label": "MALICIOUS",
+      "count": 1,
+      "matched_expected": 1
+    },
+    {
+      "group": "M7_tampered_intent_cap",
+      "label": "MALICIOUS",
+      "count": 1,
+      "matched_expected": 1
+    },
+    {
+      "group": "M8_cart_total_mismatch",
+      "label": "MALICIOUS",
+      "count": 1,
+      "matched_expected": 1
+    },
+    {
+      "group": "M9_nonce_replay",
+      "label": "MALICIOUS",
+      "count": 1,
+      "matched_expected": 1
+    }
+  ],
+  "notes": [
+    "money_blocked_paise is attacker-chosen and is NOT a savings claim -- it is reported alongside the count of attacks blocked, which is the meaningful number.",
+    "'money moved' means an authorized Razorpay payment link was created under a passing verdict, not a settled payment -- the executor never observes a completed payment (see README's honest scoping note).",
+    "INDISTINGUISHABLE attempts (the runaway loop's opening moves) are excluded from the false-negative count: they violate no stated bound, so scoring them as missed attacks would misrepresent a rate limiter as a preventer of first spend."
+  ]
+}
