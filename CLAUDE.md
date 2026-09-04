@@ -75,7 +75,7 @@ docs/                   diagrams, threat-model → control mapping, mandate exam
 - [x] Phase 2 — Policy engine: deterministic rules + verdicts + tests
 - [x] Phase 3 — Ledger: hash chain + explain() API
 - [x] Phase 4 — HITL + dashboard
-- [ ] Phase 5 — Rogue-agent demo + metrics batch
+- [x] Phase 5 — Rogue-agent demo + metrics batch
 
 ## Scope discipline (what NOT to build)
 One merchant, one product category, one buyer flow (UPI payment link, test mode). No marketplace. No real x402/stablecoin settlement (name it as future work). Lightweight signed-JSON mandates, not the full W3C Verifiable Credential stack — and say so honestly in the README. The buyer agent exists to be governed and attacked; do not gold-plate it. Depth over breadth: nothing slips past the gate.
