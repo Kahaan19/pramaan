@@ -18,7 +18,7 @@ Agentic commerce is arriving on rails that are being laid right now, and the buy
 
 - **Razorpay** ships an official [MCP server](https://mcp.razorpay.com/mcp) with 35+ tools and frames its agentic-payments product around *"with great autonomy comes a greater need for security."* The tools to let an agent pay already exist.
 - **NPCI's Unified Agent Protocol (UAP)** is a national-scale effort to register, verify and authorise AI agents above UPI — spending limits, consent, reviewability.
-- **Google's AP2**, Anthropic-adjacent **ACP**, and **x402** are competing to define how an agent proves it was authorised to buy something.
+- **Google's AP2**, OpenAI and Stripe's **Agentic Commerce Protocol (ACP)**, and **x402** are competing to define how an agent proves it was authorised to buy something.
 - **OWASP's Top 10 for Agentic Applications (2026)** names the failure modes: excessive agency, tool boundaries enforced in prompts instead of infrastructure, no human in the loop for high-impact actions, no tamper-evident audit.
 
 Every one of those efforts is solving the same blocker: an agent can already pay, but nobody can yet *prove* it was allowed to. A merchant that cannot answer "why did this agent move ₹1,299 of my customer's money, and what stopped it from moving ₹50,000?" will not turn the channel on. Pramaan answers that question for every single rupee, in plain English, from a tamper-evident record.
