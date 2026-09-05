@@ -16,6 +16,7 @@ Run:
 
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -72,6 +73,49 @@ def _explain(cart_id: str) -> None:
         print(f"    {line}")
 
 
+@dataclass
+class Outcome:
+    """What a scenario ACTUALLY did, so the closing banner reports observed
+    results instead of asserting a fixed script. An earlier version printed
+    "the legitimate purchases completed" unconditionally -- it said that even
+    on a run where both executions failed at the Razorpay hop, directly
+    contradicting the EXECUTION FAILED narrative printed just above it.
+    """
+
+    name: str      # "1a", "4b", ...
+    title: str
+    kind: str      # "attack" | "legit"
+    expected: str  # the outcome this scenario is designed to produce
+    actual: str
+    detail: str
+
+    @property
+    def ok(self) -> bool:
+        return self.actual == self.expected
+
+
+def _classify(status: int, body: dict) -> tuple[str, str]:
+    """Maps an HTTP response from /demo/checkout (or the approve endpoint)
+    onto a coarse outcome. 403/409 are the gate refusing; 5xx means the gate
+    said yes but execution did not complete -- a materially different thing,
+    and never reported as a success.
+    """
+    if status == 200:
+        checkout = body.get("checkout", {})
+        return "EXECUTED", f"order_id={checkout.get('order_id')}"
+    if status == 202:
+        return "ESCALATED", f"step_up_request_id={body.get('step_up_request_id')}"
+    if status in (403, 409):
+        verdict = body.get("verdict") or {}
+        return "BLOCKED", str(verdict.get("rule_fired") or body.get("error_code") or "denied")
+    return "EXECUTION_FAILED", str(body.get("detail") or body.get("error_code"))
+
+
+def _outcome(name: str, title: str, kind: str, expected: str, result: dict) -> Outcome:
+    actual, detail = _classify(result["response_status"], result["response_body"])
+    return Outcome(name, title, kind, expected, actual, detail)
+
+
 def run_scenario(persona: str, scenario_params: dict) -> dict:
     graph = build_graph()
     result = graph.invoke({"persona": persona, "scenario_params": scenario_params})
@@ -80,13 +124,14 @@ def run_scenario(persona: str, scenario_params: dict) -> dict:
     return result
 
 
-def scenario_1_over_mandate_spend() -> None:
+def scenario_1_over_mandate_spend() -> tuple[list[Outcome], dict]:
     _print_header("SCENARIO 1a: over-mandate spend (mandate layer) -- Rs 5,000 cart against a Rs 2,000 intent")
     result = run_scenario(
         "honest",
         {"max_amount_paise": 200000, "cart_total_paise": 500000, "merchant_id": MERCHANT_ID},
     )
     _explain(result["cart"]["cart_id"])
+    out_a = _outcome("1a", "over-mandate spend (mandate layer)", "attack", "BLOCKED", result)
 
     _print_header("SCENARIO 1b: over-mandate spend (policy layer) -- within the intent's own cap, over the platform cap")
     result = run_scenario(
@@ -94,10 +139,12 @@ def scenario_1_over_mandate_spend() -> None:
         {"max_amount_paise": 500000, "cart_total_paise": 350000, "merchant_id": MERCHANT_ID},
     )
     _explain(result["cart"]["cart_id"])
-    return result  # variant b's cart is reused by scenario 3b's nonce-replay
+    out_b = _outcome("1b", "over-mandate spend (policy layer)", "attack", "BLOCKED", result)
+    # variant b's cart is reused by scenario 3b's nonce-replay
+    return [out_a, out_b], result
 
 
-def scenario_2_goal_hijack() -> None:
+def scenario_2_goal_hijack() -> list[Outcome]:
     _print_header("SCENARIO 2a: goal hijack (mandate layer) -- injected listing redirects payment to an unknown payee")
     result = run_scenario(
         "injected",
@@ -109,6 +156,7 @@ def scenario_2_goal_hijack() -> None:
         },
     )
     _explain(result["cart"]["cart_id"])
+    out_a = _outcome("2a", "goal hijack -> unknown payee", "attack", "BLOCKED", result)
 
     _print_header("SCENARIO 2b: goal hijack (mandate layer) -- known merchant absent from the intent's OWN allowlist")
     result = run_scenario(
@@ -121,9 +169,11 @@ def scenario_2_goal_hijack() -> None:
         },
     )
     _explain(result["cart"]["cart_id"])
+    out_b = _outcome("2b", "goal hijack -> off intent allowlist", "attack", "BLOCKED", result)
+    return [out_a, out_b]
 
 
-def scenario_3_tampered_and_replay(overcap_result: dict) -> None:
+def scenario_3_tampered_and_replay(overcap_result: dict) -> list[Outcome]:
     _print_header("SCENARIO 3a: tampered cart (mandate layer) -- price edited after the merchant signed it")
     result = run_scenario(
         "honest",
@@ -135,6 +185,7 @@ def scenario_3_tampered_and_replay(overcap_result: dict) -> None:
         },
     )
     _explain(result["cart"]["cart_id"])
+    out_a = _outcome("3a", "tampered cart price (post-signing)", "attack", "BLOCKED", result)
 
     _print_header("SCENARIO 3b: replay (mandate layer) -- resubmitting scenario 1b's DENYed cart verbatim")
     result = run_scenario(
@@ -142,15 +193,18 @@ def scenario_3_tampered_and_replay(overcap_result: dict) -> None:
         {"reuse_intent": overcap_result["intent"], "reuse_cart": overcap_result["cart"]},
     )
     _explain(result["cart"]["cart_id"])
+    out_b = _outcome("3b", "replay of a burned nonce", "attack", "BLOCKED", result)
+    return [out_a, out_b]
 
 
-def scenario_4_legitimate_purchase() -> None:
+def scenario_4_legitimate_purchase() -> list[Outcome]:
     _print_header("SCENARIO 4a: legitimate purchase, fully automatic -- Rs 500, under the step-up threshold")
     result = run_scenario(
         "honest",
         {"max_amount_paise": 150000, "cart_total_paise": 50000, "merchant_id": MERCHANT_ID},
     )
     _explain(result["cart"]["cart_id"])
+    out_a = _outcome("4a", "legitimate purchase, automatic", "legit", "EXECUTED", result)
 
     _print_header("SCENARIO 4b: legitimate purchase, human-approved -- Rs 1,299, at/above the step-up threshold")
     result = run_scenario(
@@ -158,10 +212,12 @@ def scenario_4_legitimate_purchase() -> None:
         {"max_amount_paise": 200000, "cart_total_paise": 129900, "merchant_id": MERCHANT_ID},
     )
     cart_id = result["cart"]["cart_id"]
+    title_b = "legitimate purchase, human-approved"
     if result["response_status"] != 202:
         print(f"  (expected a 202 STEP_UP; got {result['response_status']} -- skipping approval)")
         _explain(cart_id)
-        return
+        actual, detail = _classify(result["response_status"], result["response_body"])
+        return [out_a, Outcome("4b", title_b, "legit", "EXECUTED", actual, f"never escalated: {detail}")]
 
     print(f"  approving via POST /demo/step-up/{cart_id}/approve (actor=demo_operator)...")
     approve_resp = httpx.post(
@@ -175,6 +231,45 @@ def scenario_4_legitimate_purchase() -> None:
     else:
         print(f"    {approve_body}")
     _explain(cart_id)
+    actual, detail = _classify(approve_resp.status_code, approve_body)
+    return [out_a, Outcome("4b", title_b, "legit", "EXECUTED", actual, detail)]
+
+
+def _print_summary(outcomes: list[Outcome]) -> bool:
+    attacks = [o for o in outcomes if o.kind == "attack"]
+    legit = [o for o in outcomes if o.kind == "legit"]
+    blocked = [o for o in attacks if o.actual == "BLOCKED"]
+    executed = [o for o in legit if o.actual == "EXECUTED"]
+    leaked = [o for o in attacks if o.actual == "EXECUTED"]
+    failures = [o for o in outcomes if not o.ok]
+
+    print()
+    print("=" * 78)
+    print("RESULTS (observed outcomes, not a fixed script)")
+    print("=" * 78)
+    for o in outcomes:
+        mark = "PASS" if o.ok else "FAIL"
+        print(f"  [{mark}] {o.name:<3} {o.title:<38} {o.actual:<16} {o.detail}")
+
+    print()
+    print(f"  Attacks blocked:               {len(blocked)}/{len(attacks)}")
+    print(f"  Legitimate purchases executed: {len(executed)}/{len(legit)}")
+    print()
+
+    # This claim is about the ATTACKS only, and is checked rather than asserted.
+    if leaked:
+        names = ", ".join(o.name for o in leaked)
+        print(f"  PRIME DIRECTIVE VIOLATED: an attack moved money ({names}).")
+    else:
+        print("  No attack moved money: each was stopped at the mandate or policy layer.")
+
+    if failures:
+        detail = ", ".join(f"{o.name} expected {o.expected}, got {o.actual}" for o in failures)
+        print(f"  {len(failures)} scenario(s) did NOT match expectation: {detail}")
+    else:
+        print("  All scenarios matched their expected outcome.")
+    print("=" * 78)
+    return not failures
 
 
 def _check_server_up() -> bool:
@@ -194,18 +289,14 @@ def main() -> int:
         )
         return 1
 
-    overcap_result = scenario_1_over_mandate_spend()
-    scenario_2_goal_hijack()
-    scenario_3_tampered_and_replay(overcap_result)
-    scenario_4_legitimate_purchase()
+    outcomes: list[Outcome] = []
+    scenario_1_outcomes, overcap_result = scenario_1_over_mandate_spend()
+    outcomes += scenario_1_outcomes
+    outcomes += scenario_2_goal_hijack()
+    outcomes += scenario_3_tampered_and_replay(overcap_result)
+    outcomes += scenario_4_legitimate_purchase()
 
-    print()
-    print("=" * 78)
-    print("Done. All three attacks blocked in both variants; the legitimate purchases")
-    print("completed (one automatic, one human-approved). No money moved outside the")
-    print("Bounded Executor at any point.")
-    print("=" * 78)
-    return 0
+    return 0 if _print_summary(outcomes) else 1
 
 
 if __name__ == "__main__":
