@@ -17,7 +17,9 @@ run offline (no live API dependency during judging).
 """
 
 import os
+import re
 import sys
+import time
 from typing import TypedDict
 
 import httpx
@@ -29,11 +31,15 @@ from personas import CATALOG, PERSONAS
 
 API_BASE = os.environ.get("PRAMAAN_API_BASE", "http://localhost:8000")
 
-# gemini-2.0-flash was retired; its 404 names this as the successor. Pinned to
-# an exact version rather than gemini-flash-latest so a demo run is reproducible.
-# No temperature= here: this model uses fixed sampling defaults and warns that
+# gemini-2.0-flash was retired (404). The free tier then caps each model at
+# 5 requests/minute AND 20 requests/day, per project -- 3.6 and 3.7 were both
+# exhausted in turn. Quota is per-model, so each switch buys a fresh 20/day;
+# a full scenarios.py run costs 8. 3.8 was returning 503 "high demand", so
+# 3.5-flash (stable, untouched budget) is the pick. Pinned to an exact
+# version rather than gemini-flash-latest so a demo run is reproducible.
+# No temperature= here: these models use fixed sampling defaults and warn that
 # the parameter is ignored.
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 
 
 class PurchasePlan(BaseModel):
@@ -71,6 +77,50 @@ def _stub_plan() -> PurchasePlan:
     return PurchasePlan(sku=item["sku"], qty=1, category=item["category"], note="offline stub planner")
 
 
+# The free tier caps generate_content at 5 requests per MINUTE per model
+# (quotaId GenerateRequestsPerMinutePerProjectPerModel-FreeTier). scenarios.py
+# fires eight planner calls back to back, so the tail of a run trips it even
+# though the daily budget is untouched. The 429 carries the wait it wants; the
+# client's own max_retries gives up before that long, so honour it here.
+_RETRY_HINT = re.compile(r"retry in (\d+(?:\.\d+)?)s|retryDelay['\"]?: ?['\"]?(\d+)s")
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Seconds the API asked us to wait, or None if waiting cannot help.
+
+    Only the per-MINUTE cap is worth retrying. A per-DAY exhaustion cannot be
+    outwaited inside a demo run, and every retry is itself a counted request --
+    retrying into a daily cap just burns the rest of the budget. Learned the
+    hard way: an earlier version retried on both and consumed a model's whole
+    remaining daily allowance.
+    """
+    text = str(exc)
+    if "RESOURCE_EXHAUSTED" not in text and "429" not in text:
+        return None
+    if "PerDay" in text:
+        return None
+    m = _RETRY_HINT.search(text)
+    if not m:
+        return 20.0
+    return float(m.group(1) or m.group(2)) + 1.0
+
+
+def _invoke_planner(structured_llm, messages, attempts: int = 3):
+    for attempt in range(attempts):
+        try:
+            return structured_llm.invoke(messages)
+        except Exception as exc:  # noqa: BLE001 -- re-raised below if not a rate limit
+            delay = _retry_after_seconds(exc)
+            if delay is None or attempt == attempts - 1:
+                raise
+            print(
+                f"[buyer-agent] rate-limited by the free tier; waiting {delay:.0f}s "
+                f"then retrying (attempt {attempt + 2}/{attempts})",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+
 def planner_node(state: BuyerState) -> dict:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -83,11 +133,12 @@ def planner_node(state: BuyerState) -> dict:
         system_prompt = PERSONAS[state["persona"]]
         llm = ChatGoogleGenerativeAI(model=GEMINI_MODEL, api_key=api_key)
         structured_llm = llm.with_structured_output(PurchasePlan)
-        plan = structured_llm.invoke(
+        plan = _invoke_planner(
+            structured_llm,
             [
                 SystemMessage(content=f"{system_prompt}\n\nCatalog:\n{_catalog_text()}"),
                 HumanMessage(content="Choose one item and return your purchase plan."),
-            ]
+            ],
         )
         return {"plan": plan.model_dump(), "used_llm": True}
     except Exception as exc:  # noqa: BLE001 -- any LLM failure falls back, never crashes the demo
