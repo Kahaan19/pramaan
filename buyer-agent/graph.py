@@ -29,6 +29,12 @@ from personas import CATALOG, PERSONAS
 
 API_BASE = os.environ.get("PRAMAAN_API_BASE", "http://localhost:8000")
 
+# gemini-2.0-flash was retired; its 404 names this as the successor. Pinned to
+# an exact version rather than gemini-flash-latest so a demo run is reproducible.
+# No temperature= here: this model uses fixed sampling defaults and warns that
+# the parameter is ignored.
+GEMINI_MODEL = "gemini-3.6-flash"
+
 
 class PurchasePlan(BaseModel):
     sku: str
@@ -75,7 +81,7 @@ def planner_node(state: BuyerState) -> dict:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         system_prompt = PERSONAS[state["persona"]]
-        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=api_key, temperature=0)
+        llm = ChatGoogleGenerativeAI(model=GEMINI_MODEL, api_key=api_key)
         structured_llm = llm.with_structured_output(PurchasePlan)
         plan = structured_llm.invoke(
             [
